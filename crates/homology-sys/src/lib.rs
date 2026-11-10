@@ -1,7 +1,7 @@
-//! The system helpers the runner needs, kept here so that it depends on no
-//! other crate of ours: starting a program without a console window,
-//! writing a file so that it is never half-written, taking turns on a file
-//! within the process, the user's cache folder and folders only the user
+//! The system helpers Homology's crates share, on the standard library
+//! alone: starting a program without a console window, writing a file so
+//! that it is never half-written, taking turns on a file within the
+//! process, the user's home and cache folders and folders only the user
 //! can read.
 
 use std::collections::HashMap;
@@ -62,6 +62,13 @@ fn resolved(path: &Path) -> PathBuf {
     }
 }
 
+/// The user's home folder: `HOME`, or `USERPROFILE` on Windows; none when
+/// it is not set to an absolute path.
+pub fn home_dir() -> Option<PathBuf> {
+    let name = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    std::env::var_os(name).map(PathBuf::from).filter(|path| path.is_absolute())
+}
+
 /// The user's cache folder on this computer: `$XDG_CACHE_HOME` when it is
 /// an absolute path, else `~/.cache` (Linux and other Unix),
 /// `~/Library/Caches` (macOS), `%LOCALAPPDATA%` (Windows). None without a
@@ -74,7 +81,7 @@ pub fn cache_home() -> Option<PathBuf> {
     if let Some(xdg) = absolute("XDG_CACHE_HOME").filter(|_| !cfg!(target_os = "macos")) {
         return Some(xdg);
     }
-    let home = absolute("HOME")?;
+    let home = home_dir()?;
     Some(if cfg!(target_os = "macos") { home.join("Library/Caches") } else { home.join(".cache") })
 }
 
@@ -94,7 +101,7 @@ pub fn private_dir(directory: &Path) -> io::Result<()> {
 }
 
 /// The sibling `<name>.tmp` a write goes through before it replaces `path`.
-fn temporary_for(path: &Path) -> PathBuf {
+pub fn temporary_for(path: &Path) -> PathBuf {
     let mut name = path.file_name().map(|name| name.to_os_string()).unwrap_or_default();
     name.push(".tmp");
     path.with_file_name(name)

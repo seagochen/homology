@@ -11,17 +11,22 @@ steps are in [#1](https://github.com/seagochen/homology/issues/1).
 ## Crates
 
 ```
+homology-sys      lib         the system helpers the others share (the standard library alone)
 homology-runner   lib + bin   the protocol (JSON lines, a hello handshake, stable error codes)
                               the server: the operations every runner has, and those a program adds (server::Runner)
                               the client: over the pipes of any child process (this computer, or ssh … serve)
                               fs.*: list, read (with sha256), write only over what was opened, search
                               env.*: Python environments found (conda, venv, pyenv, uv, the system's) and probed
                               code.check: pyflakes (bundled), imports, ruff and pylint, and a program's own rules
+homology-ssh      lib         the system ssh in batch mode: targets, scripts and sessions, stable error codes,
+                              host keys the user confirms, a password used once through askpass,
+                              login keys for hosts that take only a password
 ```
 
-Coming in the next steps: `homology-ssh` (the system `ssh`, host keys,
-askpass, login keys) and `homology` (deploying the runner, one session per
-server, the console).
+A program gives `homology-ssh` its names (`App`: its askpass helper, its
+login keys' comment, the prefix of the variables it reads). Coming in the
+next steps: `homology` (deploying the runner, one session per server, the
+console).
 
 ## Protocol
 

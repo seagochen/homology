@@ -6,7 +6,7 @@ Homology 是 AnnotaryCat 和 Crescent 共用的 runner 与远程访问层。它�
 
 - 不依赖 AnnotaryCat、Crescent 或任何界面库（egui 等）。调用方的东西（程序名、版本、缓存目录、自己的操作、自己的检查规则）都由调用方传进来。
 - `homology-runner` 要上传到用户的服务器：只依赖 `serde_json`、`sha2`、`hex`，静态构建。新依赖要说明为什么不能不用。
-- crate 之间的依赖只能向下：`homology` → `homology-ssh`、`homology-runner`；`homology-ssh` 与 `homology-runner` 互不依赖。
+- crate 之间的依赖只能向下：`homology` → `homology-ssh`、`homology-runner` → `homology-sys`；`homology-ssh` 与 `homology-runner` 互不依赖。两个以上 crate 要用的系统辅助函数放进 `homology-sys`（只用标准库），不复制。
 
 ## 2. 协议是稳定 API
 

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/homology-runner"]
+members = ["crates/homology-sys", "crates/homology-runner", "crates/homology-ssh"]
 
 [workspace.package]
 version = "0.1.0"
@@ -9,10 +9,14 @@ rust-version = "1.87"
 publish = false
 
 [workspace.dependencies]
+homology-sys = { path = "crates/homology-sys" }
 homology-runner = { path = "crates/homology-runner" }
+homology-ssh = { path = "crates/homology-ssh" }
 
 serde_json = { version = "1", features = ["preserve_order"] }
 sha2 = "0.10"
+base64 = "0.22"
+uuid = { version = "1", features = ["v4"] }
 hex = "0.4"
 tempfile = "3"
 

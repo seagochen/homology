@@ -1,0 +1,13 @@
+[package]
+name = "homology-sys"
+description = "The system helpers Homology's crates share: programs started without a console window, atomic writes, per-file locks, the user's cache and home folders, private folders"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

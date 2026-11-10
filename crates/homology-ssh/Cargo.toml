@@ -1,0 +1,20 @@
+[package]
+name = "homology-ssh"
+description = "SSH through the system's own ssh: targets, running scripts and sessions, host keys confirmed by the user, a password used once through askpass, login keys set up for password-only hosts"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+homology-sys.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+base64.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

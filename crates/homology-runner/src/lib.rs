@@ -14,10 +14,10 @@
 //!   probed without running the user's code.
 //! - [`check`]: code checked in its environment, never run, with the rules
 //!   of the program serving the runner; [`python`]: the checker's Python.
-//! - [`sys`]: the few system helpers the rest needs.
+//! - [`sys`]: the system helpers (`homology-sys`).
 //!
-//! It depends on nothing but `serde_json`, `sha2` and `hex`: it is uploaded
-//! to the user's hosts, so it stays small and static.
+//! It depends on nothing but `homology-sys`, `serde_json`, `sha2` and
+//! `hex`: it is uploaded to the user's hosts, so it stays small and static.
 
 pub mod check;
 pub mod client;
@@ -26,7 +26,8 @@ pub mod fs;
 pub mod protocol;
 pub mod python;
 pub mod server;
-pub mod sys;
+
+pub use homology_sys as sys;
 
 use std::path::Path;
 use std::process::Command;
