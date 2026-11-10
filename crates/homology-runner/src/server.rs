@@ -22,7 +22,7 @@ use crate::JsonMap;
 /// The operations every runner answers, as `hello` lists them.
 pub const OPS: &[&str] = &[
     "hello", "ping", "shutdown", "fs.list", "fs.read", "fs.write", "fs.mkdir", "fs.move", "fs.copy", "fs.delete",
-    "fs.search", "env.discover", "env.probe", "code.check",
+    "fs.search", "env.discover", "env.probe", "code.check", "toolchain.discover", "toolchain.probe", "code.exec",
 ];
 
 /// A runner as a program serves it: its name and version, as `hello` gives
@@ -76,6 +76,9 @@ impl Runner {
                 let asked = crate::check::asked(params)?;
                 return crate::check::run(self, &asked.python, &asked.files, &asked.listing, asked.timeout);
             }
+            "toolchain.discover" => return Ok(toolchain_discover()),
+            "toolchain.probe" => return crate::toolchain::probe_op(params),
+            "code.exec" => return crate::exec::op(params),
             op if op.starts_with("fs.") && OPS.contains(&op) => return crate::fs::op(op, params),
             _ => {}
         }
@@ -112,6 +115,12 @@ fn env_discover(params: &JsonMap) -> RunnerResult<Value> {
     };
     let found = crate::env::discover(&crate::env::Places::here(roots));
     Ok(json!({"environments": found.iter().map(crate::env::Found::to_json).collect::<Vec<_>>()}))
+}
+
+/// `toolchain.discover`: `{}`; `{toolchains: [{kind, name, path}]}`.
+fn toolchain_discover() -> Value {
+    let found = crate::toolchain::discover(&crate::toolchain::Places::here());
+    json!({"toolchains": found.iter().map(crate::toolchain::Tool::to_json).collect::<Vec<_>>()})
 }
 
 /// `env.probe`: `{python, timeout_secs?}`; what [`crate::env::probe`] says.
@@ -373,6 +382,28 @@ mod tests {
         let (_, replies) = session(&[HELLO, r#"{"id":2,"op":"echo","params":{"a":1}}"#, r#"{"id":3,"op":"fs.nope"}"#]);
         assert_eq!(replies[1], Message::Reply { id: 2, outcome: Ok(json!({"a": 1})) });
         assert_eq!(error_code(&replies[2]), Some(UNKNOWN_OP));
+    }
+
+    /// The toolchain operations and `code.exec`, through a session.
+    #[test]
+    fn toolchains_are_listed_and_a_command_runs_in_a_folder() {
+        let folder = tempfile::tempdir().unwrap();
+        let exec = json!({"id": 3, "op": "code.exec", "params": {"dir": folder.path().to_string_lossy(), "command": "echo ran"}});
+        let (_, replies) = session(&[
+            HELLO,
+            r#"{"id":2,"op":"toolchain.discover"}"#,
+            &exec.to_string(),
+            r#"{"id":4,"op":"toolchain.probe","params":{"path":"relative"}}"#,
+        ]);
+        let Message::Reply { outcome: Ok(hello), .. } = &replies[0] else { panic!("{:?}", replies[0]) };
+        for op in ["toolchain.discover", "toolchain.probe", "code.exec"] {
+            assert!(hello["ops"].as_array().unwrap().contains(&json!(op)), "{op}");
+        }
+        let Message::Reply { id: 2, outcome: Ok(listed) } = &replies[1] else { panic!("{:?}", replies[1]) };
+        assert!(listed["toolchains"].is_array(), "{listed}");
+        let Message::Reply { id: 3, outcome: Ok(ran) } = &replies[2] else { panic!("{:?}", replies[2]) };
+        assert_eq!((ran["code"].as_i64(), ran["stdout"].as_str().map(str::trim)), (Some(0), Some("ran")));
+        assert_eq!(error_code(&replies[3]), Some(INVALID_PARAMS));
     }
 
     #[test]

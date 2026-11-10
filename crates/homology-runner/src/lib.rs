@@ -14,6 +14,10 @@
 //!   probed without running the user's code.
 //! - [`check`]: code checked in its environment, never run, with the rules
 //!   of the program serving the runner; [`python`]: the checker's Python.
+//! - [`toolchain`]: compilers and toolchains (C, CUDA, Rust, Node) on the
+//!   runner's computer, found without running them and probed for their
+//!   version; [`exec`]: a command run in a folder for its exit code and
+//!   output (a build's check), its process group ended past its time.
 //! - [`sys`]: the system helpers (`homology-sys`).
 //!
 //! It depends on nothing but `homology-sys`, `serde_json`, `sha2` and
@@ -22,6 +26,7 @@
 pub mod check;
 pub mod client;
 pub mod env;
+pub mod exec;
 pub mod fs;
 #[cfg(test)]
 mod properties;
@@ -30,6 +35,7 @@ pub mod python;
 pub mod server;
 #[cfg(feature = "testing")]
 pub mod testing;
+pub mod toolchain;
 
 pub use homology_sys as sys;
 

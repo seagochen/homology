@@ -18,6 +18,10 @@ homology-runner   lib + bin   the protocol (JSON lines, a hello handshake, stabl
                               fs.*: list, read (with sha256), write only over what was opened, search
                               env.*: Python environments found (conda, venv, pyenv, uv, the system's) and probed
                               code.check: pyflakes (bundled), imports, ruff and pylint, and a program's own rules
+                              toolchain.*: C/C++, CUDA, Rust and Node toolchains found (PATH, ~/.cargo/bin,
+                              CUDA's folders) without running them, and probed for their version
+                              code.exec: a command run in a folder, exit code and output back, its process
+                              group ended past its time limit
 homology-ssh      lib         the system ssh in batch mode: targets, scripts and sessions, stable error codes,
                               host keys the user confirms, a password used once through askpass,
                               login keys for hosts that take only a password
