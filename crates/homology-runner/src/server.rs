@@ -3,12 +3,13 @@
 //! not speak the protocol.
 //!
 //! The operations every runner has are the session's own (`hello`, `ping`,
-//! `shutdown`) and [`crate::fs`]'s. A program that serves a runner of its
+//! `shutdown`), [`crate::fs`]'s, the environments' ([`crate::env`]) and the
+//! code check ([`crate::check`]). A program that serves a runner of its
 //! own adds its operations through [`Runner`]: `hello` lists them with the
 //! others, and a request for one goes to its `answer`.
 
 use std::io::{BufRead, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
@@ -21,11 +22,12 @@ use crate::JsonMap;
 /// The operations every runner answers, as `hello` lists them.
 pub const OPS: &[&str] = &[
     "hello", "ping", "shutdown", "fs.list", "fs.read", "fs.write", "fs.mkdir", "fs.move", "fs.copy", "fs.delete",
-    "fs.search",
+    "fs.search", "env.discover", "env.probe", "code.check",
 ];
 
 /// A runner as a program serves it: its name and version, as `hello` gives
-/// them, and the operations it adds to [`OPS`].
+/// them, where it keeps its cache, what it adds to the code check, and the
+/// operations it adds to [`OPS`].
 #[derive(Clone, Copy)]
 pub struct Runner {
     /// The program's name, for messages (`homology-runner`).
@@ -36,12 +38,28 @@ pub struct Runner {
     pub ops: &'static [&'static str],
     /// The answer to one of `ops`.
     pub answer: fn(&str, &JsonMap) -> RunnerResult<Value>,
+    /// Its cache folder on the runner's computer (the checker's Python, the
+    /// files being checked): only what can be had again.
+    pub cache: fn() -> RunnerResult<PathBuf>,
+    /// Python files it brings besides the checker's ([`crate::python`]):
+    /// its rules modules and what they import.
+    pub python: &'static [crate::python::File],
+    /// The rules modules the code check imports ([`crate::check`]).
+    pub rules: &'static [&'static str],
 }
 
 impl Runner {
     /// The runner of this crate alone (the `homology-runner` program): no
     /// operation besides [`OPS`].
-    pub const PLAIN: Runner = Runner { name: "homology-runner", version: VERSION, ops: &[], answer: none };
+    pub const PLAIN: Runner = Runner {
+        name: "homology-runner",
+        version: VERSION,
+        ops: &[],
+        answer: none,
+        cache: plain_cache,
+        python: &[],
+        rules: &[],
+    };
 
     /// Every operation it answers.
     pub fn ops(&self) -> Vec<&'static str> {
@@ -51,8 +69,15 @@ impl Runner {
     /// The outcome of every operation but the session's own (`hello`,
     /// `ping`, `shutdown`).
     fn dispatch(&self, op: &str, params: &JsonMap) -> RunnerResult<Value> {
-        if op.starts_with("fs.") && OPS.contains(&op) {
-            return crate::fs::op(op, params);
+        match op {
+            "env.discover" => return env_discover(params),
+            "env.probe" => return env_probe(params),
+            "code.check" => {
+                let asked = crate::check::asked(params)?;
+                return crate::check::run(self, &asked.python, &asked.files, &asked.listing, asked.timeout);
+            }
+            op if op.starts_with("fs.") && OPS.contains(&op) => return crate::fs::op(op, params),
+            _ => {}
         }
         if self.ops.contains(&op) {
             return (self.answer)(op, params);
@@ -62,6 +87,49 @@ impl Runner {
             format!("this runner ({} {}) has no operation {op:?}", self.name, self.version),
         ))
     }
+}
+
+/// The cache of [`Runner::PLAIN`]: `homology/runner` in the user's cache
+/// folder ([`crate::sys::cache_home`]).
+fn plain_cache() -> RunnerResult<PathBuf> {
+    crate::sys::cache_home()
+        .map(|dir| dir.join("homology").join("runner"))
+        .ok_or_else(|| RunnerError::new(crate::check::CHECK_FAILED, "this computer has no cache folder"))
+}
+
+/// `env.discover`: `{roots?: [path]}` (their `.venv` count too);
+/// `{environments: [{kind, name, python}]}`.
+fn env_discover(params: &JsonMap) -> RunnerResult<Value> {
+    let roots = match params.get("roots") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(Value::Array(dirs)) => dirs
+            .iter()
+            .map(|dir| {
+                dir.as_str().map(PathBuf::from).ok_or_else(|| RunnerError::new(INVALID_PARAMS, "roots holds paths"))
+            })
+            .collect::<RunnerResult<_>>()?,
+        Some(_) => return Err(RunnerError::new(INVALID_PARAMS, "roots is a list of paths")),
+    };
+    let found = crate::env::discover(&crate::env::Places::here(roots));
+    Ok(json!({"environments": found.iter().map(crate::env::Found::to_json).collect::<Vec<_>>()}))
+}
+
+/// `env.probe`: `{python, timeout_secs?}`; what [`crate::env::probe`] says.
+fn env_probe(params: &JsonMap) -> RunnerResult<Value> {
+    let python = params
+        .get("python")
+        .and_then(Value::as_str)
+        .filter(|python| !python.is_empty())
+        .ok_or_else(|| RunnerError::new(INVALID_PARAMS, "env.probe needs python, the interpreter's path"))?;
+    let timeout = match params.get("timeout_secs") {
+        None | Some(Value::Null) => crate::env::PROBE_TIMEOUT,
+        Some(value) => value
+            .as_u64()
+            .filter(|secs| (1..=600).contains(secs))
+            .map(std::time::Duration::from_secs)
+            .ok_or_else(|| RunnerError::new(INVALID_PARAMS, "timeout_secs is 1 to 600"))?,
+    };
+    Ok(crate::env::probe(Path::new(python), timeout))
 }
 
 /// The `answer` of a runner that adds no operation.
@@ -249,7 +317,8 @@ mod tests {
     }
 
     /// A runner that adds `echo`, answered with its params.
-    const EXTENDED: Runner = Runner { name: "test-runner", version: "9.0.0", ops: &["echo"], answer: echo };
+    const EXTENDED: Runner =
+        Runner { name: "test-runner", version: "9.0.0", ops: &["echo"], answer: echo, ..Runner::PLAIN };
 
     fn echo(_op: &str, params: &JsonMap) -> RunnerResult<Value> {
         Ok(Value::Object(params.clone()))

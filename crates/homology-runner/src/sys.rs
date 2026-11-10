@@ -1,7 +1,8 @@
 //! The system helpers the runner needs, kept here so that it depends on no
 //! other crate of ours: starting a program without a console window,
-//! writing a file so that it is never half-written, and taking turns on a
-//! file within the process.
+//! writing a file so that it is never half-written, taking turns on a file
+//! within the process, the user's cache folder and folders only the user
+//! can read.
 
 use std::collections::HashMap;
 use std::ffi::OsStr;
@@ -61,6 +62,37 @@ fn resolved(path: &Path) -> PathBuf {
     }
 }
 
+/// The user's cache folder on this computer: `$XDG_CACHE_HOME` when it is
+/// an absolute path, else `~/.cache` (Linux and other Unix),
+/// `~/Library/Caches` (macOS), `%LOCALAPPDATA%` (Windows). None without a
+/// home folder.
+pub fn cache_home() -> Option<PathBuf> {
+    let absolute = |name: &str| std::env::var_os(name).map(PathBuf::from).filter(|path| path.is_absolute());
+    if cfg!(windows) {
+        return absolute("LOCALAPPDATA");
+    }
+    if let Some(xdg) = absolute("XDG_CACHE_HOME").filter(|_| !cfg!(target_os = "macos")) {
+        return Some(xdg);
+    }
+    let home = absolute("HOME")?;
+    Some(if cfg!(target_os = "macos") { home.join("Library/Caches") } else { home.join(".cache") })
+}
+
+/// Make `directory` (and its parents) if needed, readable only by the user:
+/// `0700` on Unix, made so and reset so when it already exists. Windows is
+/// left to the user's profile it lies in.
+pub fn private_dir(directory: &Path) -> io::Result<()> {
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    builder.create(directory)?;
+    // Made before by something else: closed all the same.
+    #[cfg(unix)]
+    fs::set_permissions(directory, <fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700))?;
+    Ok(())
+}
+
 /// The sibling `<name>.tmp` a write goes through before it replaces `path`.
 fn temporary_for(path: &Path) -> PathBuf {
     let mut name = path.file_name().map(|name| name.to_os_string()).unwrap_or_default();
@@ -101,6 +133,17 @@ mod tests {
         let a = file_lock(&dir.path().join("x.py"));
         let b = file_lock(&dir.path().join("sub/../x.py"));
         assert!(Arc::ptr_eq(&a, &b));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_private_folder_is_the_user_s_alone() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let private = dir.path().join("a/b");
+        fs::create_dir_all(&private).unwrap();
+        private_dir(&private).unwrap();
+        assert_eq!(fs::metadata(&private).unwrap().permissions().mode() & 0o777, 0o700);
     }
 
     #[test]

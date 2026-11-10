@@ -1,6 +1,6 @@
 [package]
 name = "homology-runner"
-description = "The runner: JSON lines over stdin and stdout, on this computer or a user's SSH host; files, and the server and client of the protocol"
+description = "The runner: JSON lines over stdin and stdout, on this computer or a user's SSH host; files, Python environments and the code check, and the server and client of the protocol"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

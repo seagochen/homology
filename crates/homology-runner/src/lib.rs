@@ -10,14 +10,21 @@
 //! - [`client`]: the caller's side, over the pipes of any child process.
 //! - [`fs`]: a directory's files, for an editor: listed, read, written only
 //!   over what was opened, searched.
+//! - [`env`]: the Python environments on the runner's computer, found and
+//!   probed without running the user's code.
+//! - [`check`]: code checked in its environment, never run, with the rules
+//!   of the program serving the runner; [`python`]: the checker's Python.
 //! - [`sys`]: the few system helpers the rest needs.
 //!
 //! It depends on nothing but `serde_json`, `sha2` and `hex`: it is uploaded
 //! to the user's hosts, so it stays small and static.
 
+pub mod check;
 pub mod client;
+pub mod env;
 pub mod fs;
 pub mod protocol;
+pub mod python;
 pub mod server;
 pub mod sys;
 

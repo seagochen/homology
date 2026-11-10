@@ -15,12 +15,13 @@ homology-runner   lib + bin   the protocol (JSON lines, a hello handshake, stabl
                               the server: the operations every runner has, and those a program adds (server::Runner)
                               the client: over the pipes of any child process (this computer, or ssh … serve)
                               fs.*: list, read (with sha256), write only over what was opened, search
+                              env.*: Python environments found (conda, venv, pyenv, uv, the system's) and probed
+                              code.check: pyflakes (bundled), imports, ruff and pylint, and a program's own rules
 ```
 
-Coming in the next steps: Python environments and the code check
-(`homology-runner`), `homology-ssh` (the system `ssh`, host keys, askpass,
-login keys) and `homology` (deploying the runner, one session per server, the
-console).
+Coming in the next steps: `homology-ssh` (the system `ssh`, host keys,
+askpass, login keys) and `homology` (deploying the runner, one session per
+server, the console).
 
 ## Protocol
 
@@ -44,8 +45,10 @@ homology-runner serve        # one session on stdin/stdout
 homology-runner --version
 ```
 
-As a library, a program adds its own operations through `server::Runner` and
-serves the runner under its own name and version, as AnnotaryCat's
+As a library, a program serves the runner under its own name and version
+through `server::Runner`: its own operations, its cache folder, and rules for
+the code check (Python modules with a `TOOL` name and `check(texts)`, see
+`crates/homology-runner/python/homology_check.py`), as AnnotaryCat's
 `annotarycat-runner` does.
 
 ## Development
