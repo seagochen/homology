@@ -10,7 +10,8 @@
 //! another `ssh`).
 //!
 //! [`Consoles`] are the caller's session's: they end when it drops them (or
-//! when stopped). Whether a console may be started at all, and by whom, is
+//! when stopped), and with each its whole process group, so what the shell
+//! runs ends too (#4). Whether a console may be started at all, and by whom, is
 //! the caller's to decide: it runs whatever is typed into it.
 
 use std::collections::HashMap;
@@ -177,9 +178,56 @@ struct Console {
     kind: Kind,
 }
 
+impl Console {
+    /// End the console and everything in its process group, then reap it.
+    /// Its group is signalled only while its process has not been reaped
+    /// (no [`Transcript::ended`] yet): until then its id cannot have been
+    /// given to another process. A shell that exited by itself earlier
+    /// leaves what it put in the background.
+    fn end(&self) {
+        let pid = *lock(&self.pid);
+        let reaped = lock(&self.transcript).ended.is_some();
+        if let (Some(pid), false) = (pid, reaped) {
+            match &self.machine {
+                Machine::Local => end_local_group(pid),
+                Machine::Ssh { cx, target } => {
+                    // Over the network: not on the caller's thread.
+                    let (cx, target) = (cx.clone(), target.clone());
+                    std::thread::spawn(move || {
+                        let script = format!("kill -KILL -- -{pid} 2>/dev/null; kill -KILL {pid} 2>/dev/null; true");
+                        let _ = homology_ssh::run((*cx).as_ref(), &target, &script);
+                    });
+                }
+            }
+        }
+        let mut child = lock(&self.child);
+        let _ = child.kill();
+        if let Ok(status) = child.wait() {
+            lock(&self.transcript).ended.get_or_insert(status.to_string());
+        }
+    }
+}
+
 impl Drop for Console {
     fn drop(&mut self) {
-        let _ = lock(&self.child).kill();
+        self.end();
+    }
+}
+
+/// Send `signal` (a `kill` name: `INT`, `KILL`) to the process group `pid`
+/// leads on this computer (Unix).
+fn signal_local_group(pid: u32, signal: &str) -> std::io::Result<std::process::ExitStatus> {
+    homology_sys::command("kill").arg(format!("-{signal}")).arg("--").arg(format!("-{pid}")).status()
+}
+
+/// End the console `pid` on this computer with all it runs: its process
+/// group (Unix; the console leads it, [`local_command`]) or its process
+/// tree (Windows).
+fn end_local_group(pid: u32) {
+    if cfg!(windows) {
+        let _ = homology_sys::command("taskkill").args(["/T", "/F", "/PID", &pid.to_string()]).status();
+    } else {
+        let _ = signal_local_group(pid, "KILL");
     }
 }
 
@@ -362,11 +410,7 @@ impl Consoles {
             .ok_or(ConsoleError::InterruptUnavailable("the console's process is not known yet"))?;
         match &console.machine {
             Machine::Local if cfg!(unix) => {
-                homology_sys::command("kill")
-                    .arg("-INT")
-                    .arg("--")
-                    .arg(format!("-{pid}"))
-                    .status()
+                signal_local_group(pid, "INT")
                     .map_err(|error| ConsoleError::Failed(format!("cannot interrupt: {error}")))?;
             }
             Machine::Local => {
@@ -384,10 +428,10 @@ impl Consoles {
         Ok(())
     }
 
-    /// End it.
+    /// End it, with what it runs.
     pub fn stop(&self, id: &str) -> Result<(), ConsoleError> {
         let console = lock(&self.open).remove(id).ok_or_else(|| ConsoleError::NotFound(id.to_string()))?;
-        let _ = lock(&console.child).kill();
+        console.end();
         Ok(())
     }
 }
@@ -467,6 +511,51 @@ mod tests {
         assert!(seen.contains("after-6") && !seen.lines().any(|line| line == "slept"), "{seen:?}");
         consoles.stop(&id).unwrap();
         assert_eq!(bin_of("/home/u/env/bin/python"), Some("/home/u/env/bin"));
+    }
+
+    /// Whether a process with exactly the arguments `arguments` runs (not
+    /// a zombie), from `/proc`.
+    #[cfg(target_os = "linux")]
+    fn running(arguments: &[&str]) -> bool {
+        let wanted: Vec<u8> = arguments.iter().flat_map(|argument| [argument.as_bytes(), b"\0"].concat()).collect();
+        std::fs::read_dir("/proc").unwrap().flatten().any(|entry| {
+            let path = entry.path();
+            let zombie = std::fs::read_to_string(path.join("stat"))
+                .is_ok_and(|stat| stat.rsplit_once(')').is_some_and(|(_, rest)| rest.trim_start().starts_with('Z')));
+            std::fs::read(path.join("cmdline")).is_ok_and(|line| line == wanted) && !zombie
+        })
+    }
+
+    /// Wait up to five seconds for `done`.
+    #[cfg(target_os = "linux")]
+    fn eventually(done: impl Fn() -> bool) -> bool {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !done() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        done()
+    }
+
+    /// A command the shell runs ends with the console, stopped or dropped,
+    /// and the console's own process is reaped (#4).
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_console_ended_leaves_nothing_running() {
+        for (seconds, dropped) in [("7391", false), ("7392", true)] {
+            let consoles = Consoles::default();
+            let id = consoles.start(Machine::Local, Kind::Shell, "python3", None).unwrap();
+            consoles.send(&id, &format!("sleep {seconds}")).unwrap();
+            assert!(eventually(|| running(&["sleep", seconds])), "sleep {seconds} did not start");
+            let shell = lock(&consoles.get(&id).unwrap().pid).unwrap();
+            if dropped {
+                drop(consoles);
+            } else {
+                consoles.stop(&id).unwrap();
+            }
+            assert!(eventually(|| !running(&["sleep", seconds])), "sleep {seconds} left running");
+            // Reaped: not even a zombie is left.
+            assert!(!std::path::Path::new(&format!("/proc/{shell}")).exists(), "the shell {shell} not reaped");
+        }
     }
 
     /// A host's console prints its process id first and runs in the folder.
