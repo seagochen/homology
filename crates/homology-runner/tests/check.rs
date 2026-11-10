@@ -42,6 +42,19 @@ fn python() -> PathBuf {
         .expect("python3 on PATH")
 }
 
+/// A `python3` with nothing installed: a virtual environment of the
+/// system's, without its packages or pip, so whether ruff or pylint is in
+/// the developer's own environment does not change what the test sees.
+fn bare_python(dir: &Path) -> PathBuf {
+    let made = std::process::Command::new(python())
+        .args(["-m", "venv", "--without-pip"])
+        .arg(dir)
+        .status()
+        .expect("python3 -m venv");
+    assert!(made.success(), "python3 -m venv --without-pip failed");
+    dir.join("bin").join("python3")
+}
+
 fn files(list: &[(&str, &str)]) -> Vec<(String, String)> {
     list.iter().map(|(path, text)| (path.to_string(), text.to_string())).collect()
 }
@@ -80,8 +93,10 @@ fn problems_imports_no_side_effects_and_the_tools_installed() {
     );
     let listing = ["src/train.py", "src/utils.py", "src/helpers.py", "src/broken.py"].map(String::from);
     let checked = files(&[("src/train.py", &train), ("src/broken.py", "def f(:\n    pass\n")]);
+    let environment = tempfile::tempdir().unwrap();
+    let python = bare_python(environment.path());
 
-    let answer = check::run(&RUNNER, &python(), &checked, &listing, Duration::from_secs(60)).unwrap();
+    let answer = check::run(&RUNNER, &python, &checked, &listing, Duration::from_secs(60)).unwrap();
     assert_eq!(answer["tools"]["pyflakes"], "ran", "{answer}");
     assert_eq!(answer["tools"]["ruff"], "not_installed");
     assert_eq!(answer["tools"]["pylint"], "not_installed");
@@ -119,7 +134,7 @@ fn problems_imports_no_side_effects_and_the_tools_installed() {
         ]),
     );
     std::env::set_var("PYTHONPATH", tools.path());
-    let answer = check::run(&RUNNER, &python(), &checked, &listing, Duration::from_secs(60)).unwrap();
+    let answer = check::run(&RUNNER, &python, &checked, &listing, Duration::from_secs(60)).unwrap();
     std::env::remove_var("PYTHONPATH");
     assert_eq!(
         (answer["tools"]["ruff"].as_str(), answer["tools"]["pylint"].as_str()),

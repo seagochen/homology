@@ -75,6 +75,13 @@ line inside a character, no file operation reaches outside its folder
 through any link, the protocol's lines read back as written, lines are
 read whole and bounded, and a session answers each request once.
 
+It also checks that no secret leaks (`crates/homology-ssh/tests/secrets.rs`):
+a password login and a login key's set-up run against a stand-in `ssh`
+that records its arguments, environment and stdin and runs the scripts in a
+stand-in host's home; the password is then looked for in all of that, in
+every file left on either side and in the errors, and the private key on
+the host.
+
 Coverage-guided fuzzing of what the runner reads from others is in
 `fuzz/` (its own workspace, never part of a runner), with cargo-fuzz on a
 nightly toolchain:
