@@ -26,6 +26,8 @@ pub mod fs;
 pub mod protocol;
 pub mod python;
 pub mod server;
+#[cfg(feature = "testing")]
+pub mod testing;
 
 pub use homology_sys as sys;
 

@@ -21,12 +21,15 @@ homology-runner   lib + bin   the protocol (JSON lines, a hello handshake, stabl
 homology-ssh      lib         the system ssh in batch mode: targets, scripts and sessions, stable error codes,
                               host keys the user confirms, a password used once through askpass,
                               login keys for hosts that take only a password
+homology          lib         the caller's side: a program's runners carried for SSH hosts, placed on a
+                              host by their hash and talked to over ssh … serve, one session per host
 ```
 
 A program gives `homology-ssh` its names (`App`: its askpass helper, its
-login keys' comment, the prefix of the variables it reads). Coming in the
-next steps: `homology` (deploying the runner, one session per server, the
-console).
+login keys' comment, the prefix of the variables it reads), and `homology`
+the runner it deploys (`Program`: its name, version, folder in a host's
+cache, the prefix of the variables that point at other runners). Coming in
+the next steps: the console, and building `homology-runner` on its own.
 
 ## Protocol
 

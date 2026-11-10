@@ -19,5 +19,10 @@ serde_json.workspace = true
 sha2.workspace = true
 hex.workspace = true
 
+[features]
+# `testing::built()` for tests of crates that start a built runner; only
+# their `[dev-dependencies]` turn it on.
+testing = []
+
 [dev-dependencies]
 tempfile.workspace = true

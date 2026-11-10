@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/homology-sys", "crates/homology-runner", "crates/homology-ssh"]
+members = ["crates/homology-sys", "crates/homology-runner", "crates/homology-ssh", "crates/homology"]
 
 [workspace.package]
 version = "0.1.0"
@@ -12,6 +12,7 @@ publish = false
 homology-sys = { path = "crates/homology-sys" }
 homology-runner = { path = "crates/homology-runner" }
 homology-ssh = { path = "crates/homology-ssh" }
+homology = { path = "crates/homology" }
 
 serde_json = { version = "1", features = ["preserve_order"] }
 sha2 = "0.10"
