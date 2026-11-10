@@ -279,10 +279,21 @@ fn local_command(kind: Kind, python: &str, dir: Option<&str>) -> Command {
     command
 }
 
+/// `dir` quoted for a POSIX shell, a leading `~` kept outside the quotes
+/// so the shell expands it (as `SshTarget::quoted_path` does): a folder in
+/// the home is written `~/…` (#10).
+fn quoted_dir(dir: &str) -> String {
+    match dir.strip_prefix('~') {
+        Some("") => "~".into(),
+        Some(rest) if rest.starts_with('/') => format!("~/{}", shell_quote(rest.trim_start_matches('/'))),
+        _ => shell_quote(dir),
+    }
+}
+
 /// The script that runs a console of `kind` on a host, in `dir` when it is
 /// there: it prints its process id first ([`PID_MARK`]).
 fn host_script(kind: Kind, python: &str, dir: Option<&str>) -> String {
-    let place = dir.map(|dir| format!("cd {} 2>/dev/null; ", shell_quote(dir))).unwrap_or_default();
+    let place = dir.map(|dir| format!("cd {} 2>/dev/null; ", quoted_dir(dir))).unwrap_or_default();
     let run = match kind {
         Kind::Python => format!("exec {} -u -i -q", shell_quote(python)),
         Kind::Shell => {
@@ -556,6 +567,18 @@ mod tests {
             // Reaped: not even a zombie is left.
             assert!(!std::path::Path::new(&format!("/proc/{shell}")).exists(), "the shell {shell} not reaped");
         }
+    }
+
+    /// A folder in the home keeps its `~` for the shell; others are quoted whole.
+    #[test]
+    fn a_folder_in_the_home_is_gone_to_by_its_tilde() {
+        assert_eq!(quoted_dir("~"), "~");
+        assert_eq!(quoted_dir("~/work"), "~/'work'");
+        assert_eq!(quoted_dir("~/my 'dir'"), r"~/'my '\''dir'\'''");
+        assert_eq!(quoted_dir("/srv/a b"), "'/srv/a b'");
+        // `~user` is not the home: quoted as it is.
+        assert_eq!(quoted_dir("~other/x"), "'~other/x'");
+        assert!(host_script(Kind::Shell, "/env/bin/python", Some("~/work")).starts_with("cd ~/'work' 2>/dev/null; "));
     }
 
     /// A host's console prints its process id first and runs in the folder.
