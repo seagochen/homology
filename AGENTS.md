@@ -5,7 +5,7 @@ Homology 是 AnnotaryCat 和 Crescent 共用的 runner 与远程访问层。它�
 ## 1. 独立
 
 - 不依赖 AnnotaryCat、Crescent 或任何界面库（egui 等）。调用方的东西（程序名、版本、缓存目录、自己的操作、自己的检查规则）都由调用方传进来。
-- `homology-runner` 要上传到用户的服务器：只依赖 `serde_json`、`sha2`、`hex`，静态构建。新依赖要说明为什么不能不用。
+- `homology-runner` 要上传到用户的服务器：只依赖 `homology-sys`、`serde_json`、`sha2`、`hex`，用 `scripts/build-runners.sh` 静态构建（musl，rust-lld 链接，`.cargo/config.toml`）。新依赖要说明为什么不能不用。
 - crate 之间的依赖只能向下：`homology` → `homology-ssh`、`homology-runner` → `homology-sys`；`homology-ssh` 与 `homology-runner` 互不依赖。两个以上 crate 要用的系统辅助函数放进 `homology-sys`（只用标准库），不复制。
 
 ## 2. 协议是稳定 API
@@ -39,6 +39,9 @@ Homology 是 AnnotaryCat 和 Crescent 共用的 runner 与远程访问层。它�
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
+scripts/build-runners.sh     # 改了 homology-runner 或它的依赖时：两个架构的静态构建
 ```
+
+CI（`.github/workflows/ci.yml`）在 Linux、Windows、macOS 上跑上面前三项，并在 Linux 和 macOS 上跑 `scripts/build-runners.sh`；推送前本机先跑过，CI 不是第一次检查。
 
 在 AnnotaryCat 中改动 Homology 时：先在本仓库提交并推送到 `main`，再在 AnnotaryCat 中提交 submodule 的新提交；两边的测试都要通过。

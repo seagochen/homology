@@ -1,0 +1,66 @@
+# Checks every push and pull request: formatting, lints and tests on Linux,
+# Windows and macOS, and the static Linux runners built the way a program
+# that carries them builds them (scripts/build-runners.sh).
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: check (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy,rustfmt
+          rustup default stable
+      - name: Format
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo fmt --all --check
+      - name: Lints
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - name: Tests
+        run: cargo test --locked --workspace
+
+  runners:
+    name: runners (built on ${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - name: Build
+        run: scripts/build-runners.sh --out runners
+      - name: Static, and the x86_64 one runs
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          file runners/homology-runner-linux-*
+          file runners/homology-runner-linux-x86_64 | grep -q 'static'
+          file runners/homology-runner-linux-aarch64 | grep -q 'statically linked'
+          chmod +x runners/homology-runner-linux-x86_64
+          runners/homology-runner-linux-x86_64 --version
+      - uses: actions/upload-artifact@v4
+        if: matrix.os == 'ubuntu-latest'
+        with:
+          name: homology-runners
+          path: runners/

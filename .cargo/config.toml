@@ -1,0 +1,8 @@
+# The runners for SSH hosts (scripts/build-runners.sh): static Linux
+# programs linked by the linker Rust ships, so any build machine (Linux,
+# macOS, Windows) makes them without a cross toolchain.
+[target.x86_64-unknown-linux-musl]
+linker = "rust-lld"
+
+[target.aarch64-unknown-linux-musl]
+linker = "rust-lld"

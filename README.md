@@ -32,13 +32,39 @@ login keys' comment, the prefix of the variables it reads), and `homology`
 the runner it deploys (`Program`: its name, version, folder in a host's
 cache, the prefix of the variables that point at other runners). A console
 on a host takes the program's own session type, any that holds
-`homology-ssh`'s `Context` (`AsRef`). Coming in the next step: building
-`homology-runner` on its own.
+`homology-ssh`'s `Context` (`AsRef`).
 
 Files are written so that a reader sees the old content or the new, never
 half of it: through a temporary file beside them with a random name, made
 only where nothing is yet, so a link someone left in the folder is never
 written through (#3).
+
+## The runner on its own
+
+`homology-runner` works without any program of its own: `Program::PLAIN`
+deploys it, with the operations every runner has.
+
+```sh
+scripts/build-runners.sh            # target/runners/homology-runner-linux-{x86_64,aarch64}, SHA256SUMS
+```
+
+The script builds static Linux programs (musl) for x86_64 and aarch64,
+linked by the `rust-lld` Rust ships (`.cargo/config.toml`), so Linux, macOS
+and Windows (Git Bash) build them with nothing but `rustup`. They are
+written without the executable bit; `homology::deploy` makes one
+executable only on the host it sends it to, in
+`$XDG_CACHE_HOME/homology/runner/bin/<version>/`, and replaces it when its
+hash differs. A program finds them beside itself (`runner/`, or
+`../Resources/runner` in a macOS bundle) or where `HOMOLOGY_RUNNER_DIR`
+says; this computer's runner beside itself or where `HOMOLOGY_RUNNER` says.
+
+```text
+homology-runner serve       one session on stdin/stdout (JSON lines)
+homology-runner --version   the version and protocol
+```
+
+CI (`.github/workflows/ci.yml`) checks formatting, lints and tests on
+Linux, Windows and macOS, and builds the runners on Linux and macOS.
 
 ## Protocol
 
