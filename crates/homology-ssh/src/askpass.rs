@@ -3,11 +3,18 @@
 //! `ssh` asks its `SSH_ASKPASS` program for a password and reads the answer
 //! from that program's stdout. The program is the one using this crate
 //! ([`crate::App`]): started with `<ENV>_ASKPASS` set, it connects to the
-//! loopback port named there, presents the one-time token beside it and
-//! prints what comes back ([`client_main`]). The password itself is never in an argument, an
+//! channel named there, presents the one-time token beside it and prints
+//! what comes back ([`client_main`]). The password itself is never in an argument, an
 //! environment variable or a file: it lives in this process, behind a
 //! listener that answers once, to the holder of the token, and closes when
 //! the `ssh` run ends.
+//!
+//! The channel is a Unix socket only this user can open, in this process's
+//! temporary directory ([`homology_sys::local_socket`]), and on Windows a
+//! port on `127.0.0.1`. A sandboxed macOS app may not listen on a port
+//! without the `network.server` entitlement, which App Review refuses to an
+//! app that is not a network server; the helper `ssh` starts inherits the
+//! sandbox and reaches the socket in the container.
 //!
 //! A sandboxed macOS app cannot use itself: `ssh` inherits the sandbox, and
 //! an executable with its own `app-sandbox` entitlement is killed when it
@@ -16,15 +23,18 @@
 //! `inherit` only, and [`program`] prefers it.
 
 use std::io::{BufRead, BufReader, Read, Write};
+#[cfg(not(unix))]
 use std::net::{TcpListener, TcpStream};
+#[cfg(unix)]
+use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use crate::{App, SshError, SshResult};
 
-/// The variable set on the `ssh` child, `<address> <token>`:
-/// `<ENV>_ASKPASS`.
+/// The variable set on the `ssh` child, `<address> <token>`, the address a
+/// socket's path (or, on Windows, `127.0.0.1:<port>`): `<ENV>_ASKPASS`.
 pub fn env_name(app: App) -> String {
     app.var("ASKPASS")
 }
@@ -94,24 +104,52 @@ pub struct Server {
     stop: Arc<AtomicBool>,
     answered: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
+    /// The socket's path, removed when the server stops.
+    #[cfg(unix)]
+    socket: std::path::PathBuf,
 }
 
 impl Server {
-    /// Listen on a loopback port for the askpass program, with a fresh one-time
-    /// token, until dropped.
+    /// Listen for the askpass program, on a private socket (on Windows a
+    /// loopback port), with a fresh one-time token, until dropped.
     pub fn start(password: &Password) -> SshResult<Self> {
         let failed =
             |error: std::io::Error| SshError::new("ssh_failed", format!("cannot open the askpass channel: {error}"));
+        #[cfg(unix)]
+        let (listener, socket) = homology_sys::local_socket::bind("ap").map_err(failed)?;
+        #[cfg(unix)]
+        let address = socket.to_string_lossy().into_owned();
+        #[cfg(not(unix))]
         let listener = TcpListener::bind("127.0.0.1:0").map_err(failed)?;
-        listener.set_nonblocking(true).map_err(failed)?;
+        #[cfg(not(unix))]
         let address = listener.local_addr().map_err(failed)?.to_string();
+        let stopped = |error| {
+            #[cfg(unix)]
+            homology_sys::local_socket::remove(&socket);
+            failed(error)
+        };
+        listener.set_nonblocking(true).map_err(stopped)?;
         let token = format!("{}{}", uuid::Uuid::new_v4().simple(), uuid::Uuid::new_v4().simple());
         let stop = Arc::new(AtomicBool::new(false));
         let answered = Arc::new(AtomicBool::new(false));
         let answer = Password(password.bytes().to_vec());
         let (expected, stopping, handed) = (token.clone(), stop.clone(), answered.clone());
-        let thread = std::thread::spawn(move || serve(&listener, &expected, &answer, &stopping, &handed));
-        Ok(Self { address, token, stop, answered, thread: Some(thread) })
+        let accept = move || {
+            let (stream, _) = listener.accept()?;
+            stream.set_nonblocking(false)?;
+            stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+            Ok(stream)
+        };
+        let thread = std::thread::spawn(move || serve(accept, &expected, &answer, &stopping, &handed));
+        Ok(Self {
+            address,
+            token,
+            stop,
+            answered,
+            thread: Some(thread),
+            #[cfg(unix)]
+            socket,
+        })
     }
 
     /// Whether the askpass program collected the password. When `ssh` asked
@@ -133,20 +171,27 @@ impl Drop for Server {
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
+        #[cfg(unix)]
+        homology_sys::local_socket::remove(&self.socket);
     }
 }
 
-/// Answer the first client with the right token, then stop; any other
-/// client gets nothing.
-fn serve(listener: &TcpListener, token: &str, answer: &Password, stop: &AtomicBool, answered: &AtomicBool) {
+/// Answer the first client `accept` gives with the right token, then stop;
+/// any other client gets nothing. `accept` does not block: it fails with
+/// `WouldBlock` while no client is waiting.
+fn serve<S: Read + Write>(
+    accept: impl Fn() -> std::io::Result<S>,
+    token: &str,
+    answer: &Password,
+    stop: &AtomicBool,
+    answered: &AtomicBool,
+) {
     while !stop.load(Ordering::SeqCst) {
-        match listener.accept() {
-            Ok((mut stream, _)) => {
-                let _ = stream.set_nonblocking(false);
-                let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+        match accept() {
+            Ok(mut stream) => {
                 let mut line = String::new();
-                let mut reader = BufReader::new((&stream).take(256));
-                if reader.read_line(&mut line).is_ok() && line.trim_end() == token {
+                let presented = BufReader::new(Read::by_ref(&mut stream).take(256)).read_line(&mut line).is_ok();
+                if presented && line.trim_end() == token {
                     let mut reply = answer.bytes().to_vec();
                     reply.push(b'\n');
                     if stream.write_all(&reply).is_ok() {
@@ -168,9 +213,12 @@ fn serve(listener: &TcpListener, token: &str, answer: &Password, stop: &AtomicBo
 
 /// Ask the server named by `value` (`<address> <token>`) for the password.
 pub fn fetch(value: &str) -> Option<Vec<u8>> {
-    let (address, token) = value.split_once(' ')?;
-    let address = address.parse().ok()?;
-    let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(5)).ok()?;
+    // The token has no spaces; a socket's path might.
+    let (address, token) = value.rsplit_once(' ')?;
+    #[cfg(unix)]
+    let mut stream = UnixStream::connect(address).ok()?;
+    #[cfg(not(unix))]
+    let mut stream = TcpStream::connect_timeout(&address.parse().ok()?, Duration::from_secs(5)).ok()?;
     stream.set_read_timeout(Some(Duration::from_secs(5))).ok()?;
     stream.write_all(format!("{token}\n").as_bytes()).ok()?;
     let mut reply = Vec::new();
@@ -214,12 +262,30 @@ mod tests {
         let server = Server::start(&Password::new("s3cret pass")).unwrap();
         let value = server.env_value();
         assert!(!value.contains("s3cret"), "the environment value names the channel only");
-        let (address, _) = value.split_once(' ').unwrap();
+        let (address, _) = value.rsplit_once(' ').unwrap();
         assert_eq!(fetch(&format!("{address} wrong-token")), None);
         assert!(!server.answered(), "a wrong token collects nothing");
         assert_eq!(fetch(&value).as_deref(), Some(&b"s3cret pass"[..]));
         assert!(server.answered());
         assert_eq!(fetch(&value), None, "one answer only");
+    }
+
+    /// No port is opened: the channel is a socket only this user can open,
+    /// gone when the server is.
+    #[cfg(unix)]
+    #[test]
+    fn the_channel_is_a_private_socket_not_a_port() {
+        use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+        let server = Server::start(&Password::new("pw")).unwrap();
+        let value = server.env_value();
+        let (address, _) = value.rsplit_once(' ').unwrap();
+        let socket = std::path::PathBuf::from(address);
+        assert!(socket.is_absolute() && !address.contains("127.0.0.1"), "{address}");
+        let metadata = std::fs::metadata(&socket).unwrap();
+        assert!(metadata.file_type().is_socket());
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+        drop(server);
+        assert!(!socket.exists(), "the socket is removed with the server");
     }
 
     #[test]

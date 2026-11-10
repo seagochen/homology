@@ -1,6 +1,6 @@
 [package]
 name = "homology-sys"
-description = "The system helpers Homology's crates share: programs started without a console window, atomic writes, per-file locks, the user's cache and home folders, private folders"
+description = "The system helpers Homology's crates share: programs started without a console window, atomic writes, per-file locks, the user's cache and home folders, private folders, local Unix sockets"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

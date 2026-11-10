@@ -1,8 +1,9 @@
 //! The system helpers Homology's crates share, on the standard library
 //! alone: starting a program without a console window, writing a file so
 //! that it is never half-written, taking turns on a file within the
-//! process, the user's home and cache folders and folders only the user
-//! can read.
+//! process, the user's home and cache folders, folders only the user
+//! can read, and Unix sockets a program's own processes talk over
+//! ([`local_socket`]).
 
 use std::collections::HashMap;
 use std::ffi::OsStr;
@@ -11,6 +12,9 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, LazyLock, Mutex, PoisonError};
+
+#[cfg(unix)]
+pub mod local_socket;
 
 /// `program` as a command to configure and run: no console window of its
 /// own on Windows (a GUI program that starts it would flash one), and an
