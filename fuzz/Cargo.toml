@@ -1,0 +1,52 @@
+# Coverage-guided fuzzing of what the runner reads from others (homology#2):
+# its own workspace, outside Homology's, never built by `cargo test` and
+# never part of a runner. Run with cargo-fuzz on a nightly toolchain:
+#
+#   cargo install cargo-fuzz
+#   cargo +nightly fuzz run request_parse -- -max_total_time=600
+#
+# (from the repository root; `cargo +nightly fuzz list` names the targets).
+[package]
+name = "homology-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+homology-runner = { path = "../crates/homology-runner" }
+
+# Not a member of Homology's workspace.
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "request_parse"
+path = "fuzz_targets/request_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "message_parse"
+path = "fuzz_targets/message_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "serve"
+path = "fuzz_targets/serve.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "program_output"
+path = "fuzz_targets/program_output.rs"
+test = false
+doc = false
+bench = false

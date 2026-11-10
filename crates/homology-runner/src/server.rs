@@ -14,8 +14,8 @@ use std::path::{Path, PathBuf};
 use serde_json::{json, Value};
 
 use crate::protocol::{
-    Message, Request, RunnerError, RunnerResult, HELLO_REQUIRED, INVALID_PARAMS, PROTOCOL, PROTOCOL_MISMATCH,
-    UNKNOWN_OP, VERSION,
+    read_line, Line, Message, Request, RunnerError, RunnerResult, HELLO_REQUIRED, INVALID_PARAMS, MAX_LINE,
+    MESSAGE_TOO_LARGE, PROTOCOL, PROTOCOL_MISMATCH, UNKNOWN_OP, VERSION,
 };
 use crate::JsonMap;
 
@@ -179,11 +179,19 @@ fn fault() -> Option<Fault> {
 }
 
 /// Serve one session of `runner`.
-pub fn serve(runner: &Runner, input: impl BufRead, mut output: impl Write) -> std::io::Result<Ended> {
+pub fn serve(runner: &Runner, mut input: impl BufRead, mut output: impl Write) -> std::io::Result<Ended> {
     let fault = fault();
     let mut greeted = false;
-    for line in input.lines() {
-        let line = line?;
+    while let Some(line) = read_line(&mut input, MAX_LINE)? {
+        let line = match line {
+            Line::Text(line) => line,
+            // Its id cannot be read without keeping it: say so and leave.
+            Line::TooLong => {
+                let error = RunnerError::new(MESSAGE_TOO_LARGE, format!("a line over {MAX_LINE} bytes"));
+                send(&mut output, &Message::Event { event: "error".into(), data: error.to_json() })?;
+                return Ok(Ended::Refused(error.message));
+            }
+        };
         if line.trim().is_empty() {
             continue;
         }
@@ -314,6 +322,19 @@ mod tests {
         let ended = serve(&EXTENDED, input.as_bytes(), &mut output).unwrap();
         let written = String::from_utf8(output).unwrap();
         (ended, written.lines().map(|line| Message::parse(line).unwrap()).collect())
+    }
+
+    /// A line over the limit ends the session with `message_too_large`,
+    /// the line not kept; what came before it was answered.
+    #[test]
+    fn a_line_over_the_limit_ends_the_session() {
+        let long = "x".repeat(MAX_LINE + 1);
+        let hello = r#"{"id":1,"op":"hello","params":{"protocol":1}}"#;
+        let (ended, messages) = session(&[hello, &long, r#"{"id":2,"op":"ping"}"#]);
+        assert!(matches!(ended, Ended::Refused(_)));
+        assert_eq!(messages.len(), 2, "{messages:?}");
+        let Message::Event { event, data } = &messages[1] else { panic!("{messages:?}") };
+        assert_eq!((event.as_str(), data["code"].as_str()), ("error", Some(MESSAGE_TOO_LARGE)));
     }
 
     /// A runner that adds `echo`, answered with its params.

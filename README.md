@@ -63,6 +63,27 @@ homology-runner serve       one session on stdin/stdout (JSON lines)
 homology-runner --version   the version and protocol
 ```
 
+## Testing
+
+`cargo test --workspace` also checks properties on random inputs
+(`crates/homology-runner/src/properties.rs`, proptest): search never cuts a
+line inside a character, no file operation reaches outside its folder
+through any link, the protocol's lines read back as written, lines are
+read whole and bounded, and a session answers each request once.
+
+Coverage-guided fuzzing of what the runner reads from others is in
+`fuzz/` (its own workspace, never part of a runner), with cargo-fuzz on a
+nightly toolchain:
+
+```sh
+cargo install cargo-fuzz
+cargo +nightly fuzz list                                      # request_parse, message_parse, serve, program_output
+cargo +nightly fuzz run serve -- -max_total_time=600
+```
+
+The `serve` target never performs what its input asks of this computer:
+every request but `hello`, `ping` and `shutdown` is renamed first.
+
 CI (`.github/workflows/ci.yml`) checks formatting, lints and tests on
 Linux, Windows and macOS, and builds the runners on Linux and macOS.
 

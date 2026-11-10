@@ -47,6 +47,67 @@ pub const RUNNER_INVALID_OUTPUT: &str = "runner_invalid_output";
 pub const RUNNER_TIMEOUT: &str = "runner_timeout";
 /// Writing to the runner failed.
 pub const RUNNER_IO: &str = "runner_io";
+/// A line longer than [`MAX_LINE`]: the session ends, its memory bounded.
+pub const MESSAGE_TOO_LARGE: &str = "message_too_large";
+
+/// The most bytes of one line either side reads (its end not counted): far
+/// over any request or reply the operations make (a file is at most
+/// 2 MiB), so that what a session holds is bounded whatever arrives.
+pub const MAX_LINE: usize = 64 * 1024 * 1024;
+
+/// One line read by [`read_line`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Line {
+    /// Its text, without the line end (`\n` or `\r\n`).
+    Text(String),
+    /// It was longer than the limit: read to its end and dropped.
+    TooLong,
+}
+
+/// Read one line of at most `max` bytes from `reader`; `None` at the end of
+/// the input. A longer line is read to its end without being kept
+/// ([`Line::TooLong`]); one that is not UTF-8 is an `InvalidData` error, as
+/// [`std::io::BufRead::lines`] has it.
+pub fn read_line(reader: &mut impl std::io::BufRead, max: usize) -> std::io::Result<Option<Line>> {
+    let mut bytes = Vec::new();
+    let (mut any, mut too_long) = (false, false);
+    loop {
+        let buffer = match reader.fill_buf() {
+            Ok(buffer) => buffer,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        };
+        if buffer.is_empty() {
+            break;
+        }
+        any = true;
+        let end = buffer.iter().position(|byte| *byte == b'\n');
+        let content = &buffer[..end.unwrap_or(buffer.len())];
+        if !too_long && bytes.len() + content.len() <= max {
+            bytes.extend_from_slice(content);
+        } else {
+            too_long = true;
+            bytes = Vec::new();
+        }
+        let used = end.map_or(buffer.len(), |at| at + 1);
+        reader.consume(used);
+        if end.is_some() {
+            break;
+        }
+    }
+    if !any {
+        return Ok(None);
+    }
+    if too_long {
+        return Ok(Some(Line::TooLong));
+    }
+    if bytes.last() == Some(&b'\r') {
+        bytes.pop();
+    }
+    String::from_utf8(bytes)
+        .map(|text| Some(Line::Text(text)))
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+}
 
 /// A failure with a stable `code`, from either side.
 #[derive(Clone, Debug, PartialEq, Eq)]

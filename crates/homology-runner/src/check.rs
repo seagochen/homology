@@ -36,16 +36,6 @@ fn failed(message: impl Into<String>) -> RunnerError {
     RunnerError::new(CHECK_FAILED, message)
 }
 
-/// Whether `text` is a relative, `/`-separated path that stays inside its
-/// folder (no `..`).
-fn relative(text: &str) -> bool {
-    !text.is_empty()
-        && !text.starts_with('/')
-        && !text.contains('\\')
-        && !text.contains(':')
-        && text.split('/').all(|part| !part.is_empty() && part != "." && part != "..")
-}
-
 /// The files to check, as `(path, text)`, checked for their shape.
 pub fn files_of(value: Option<&Value>) -> RunnerResult<Vec<(String, String)>> {
     let listed =
@@ -64,7 +54,7 @@ pub fn files_of(value: Option<&Value>) -> RunnerResult<Vec<(String, String)>> {
                 .get("text")
                 .and_then(Value::as_str)
                 .ok_or_else(|| RunnerError::new(INVALID_PARAMS, "a file has its text"))?;
-            if !relative(path) {
+            if !crate::fs::is_relative(path) {
                 return Err(RunnerError::new(
                     INVALID_PARAMS,
                     format!("{path:?} is not a relative path inside the folder"),

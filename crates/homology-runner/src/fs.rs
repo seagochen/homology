@@ -99,14 +99,8 @@ pub fn list_entries(dir: &Path) -> RunnerResult<Listing> {
 
 /// `path` under `root`, checked to be a relative path that stays inside it
 /// (a link leading out of it counts as outside).
-fn inside(root: &Path, path: &str) -> RunnerResult<PathBuf> {
-    let ok = !path.is_empty()
-        && !path.starts_with('/')
-        && !path.contains('\\')
-        && !path.contains(':')
-        && !path.contains('\0')
-        && path.split('/').all(|part| !part.is_empty() && part != "." && part != "..");
-    if !ok {
+pub(crate) fn inside(root: &Path, path: &str) -> RunnerResult<PathBuf> {
+    if !is_relative(path) {
         return Err(RunnerError::new(
             CODE_PATH_INVALID,
             format!("{path:?} is not a relative path inside the directory"),
@@ -127,6 +121,19 @@ fn inside(root: &Path, path: &str) -> RunnerResult<PathBuf> {
         return Err(RunnerError::new(CODE_PATH_INVALID, format!("{path:?} leads out of the directory")));
     }
     Ok(full)
+}
+
+/// Whether `path` is a relative, `/`-separated path that names something
+/// inside its folder by its text alone: not empty, no leading `/`, no `\\`,
+/// `:` or NUL, no empty, `.` or `..` part. The one rule for every path a
+/// caller names (`fs.*`, the files `code.check` is given).
+pub fn is_relative(path: &str) -> bool {
+    !path.is_empty()
+        && !path.starts_with('/')
+        && !path.contains('\\')
+        && !path.contains(':')
+        && !path.contains('\0')
+        && path.split('/').all(|part| !part.is_empty() && part != "." && part != "..")
 }
 
 /// The SHA-256 of `bytes` in lower-case hex: the version a save names.
@@ -299,26 +306,52 @@ pub fn write(root: &Path, path: &str, text: &str, expected: Option<&str>) -> Run
     Ok(json!({"path": path, "sha256": sha256(text.as_bytes()), "size": text.len()}))
 }
 
-/// Where `query` is on `line`: char columns from 1. Without `match_case`,
-/// letters are compared lowercased (a line whose lowercase changes its
-/// length is compared as it is).
-fn found_in(line: &str, query: &str, match_case: bool) -> Vec<usize> {
-    let (hay, needle) = if match_case {
-        (line.to_string(), query.to_string())
-    } else {
-        let lower = line.to_lowercase();
-        if lower.len() == line.len() {
-            (lower, query.to_lowercase())
-        } else {
-            (line.to_string(), query.to_string())
-        }
-    };
+/// `text` lowercased character by character ([`char::to_lowercase`], the
+/// same for a line and a query), with, for each byte of the result, the
+/// index of the character of `text` it came from, and whether a
+/// character's lowercase starts there.
+pub(crate) fn folded(text: &str) -> (String, Vec<(usize, bool)>) {
+    let mut lower = String::with_capacity(text.len());
+    let mut origin = Vec::with_capacity(text.len());
+    for (index, character) in text.chars().enumerate() {
+        let from = lower.len();
+        lower.extend(character.to_lowercase());
+        origin.extend((from..lower.len()).map(|at| (index, at == from)));
+    }
+    (lower, origin)
+}
+
+/// Where `query` is on `line`: char columns from 1, strictly increasing,
+/// matches not overlapping. Without `match_case`, each character is
+/// compared by its lowercase ([`folded`]) and a match starts where one of
+/// the line's characters does: a column always names the character of
+/// `line` the match starts at, whatever lowercasing does to lengths
+/// (homology#2: `"ȺȺK"` and `k` once cut the line inside a character).
+pub(crate) fn found_in(line: &str, query: &str, match_case: bool) -> Vec<usize> {
     let mut columns = Vec::new();
+    if query.is_empty() {
+        return columns;
+    }
+    if match_case {
+        for (at, _) in line.match_indices(query) {
+            columns.push(line[..at].chars().count() + 1);
+        }
+        return columns;
+    }
+    let (hay, origin) = folded(line);
+    let (needle, _) = folded(query);
     let mut from = 0;
     while let Some(at) = hay.get(from..).and_then(|rest| rest.find(&needle)) {
         let start = from + at;
-        columns.push(line[..start].chars().count() + 1);
-        from = start + needle.len().max(1);
+        match origin.get(start) {
+            Some(&(index, true)) => {
+                columns.push(index + 1);
+                from = start + needle.len();
+            }
+            // Inside one character's lowercase: look on from its next byte
+            // that starts a character of the folded text.
+            _ => from = start + hay[start..].chars().next().map_or(1, char::len_utf8),
+        }
     }
     columns
 }
@@ -425,6 +458,22 @@ mod tests {
         assert_eq!(exact["matches"].as_array().unwrap().len(), 1);
         assert_eq!(exact["matches"][0]["text"], "loss = Loss()");
         assert_eq!(op("fs.search", &params(json!({"root": root, "query": ""}))).unwrap_err().code, INVALID_PARAMS);
+    }
+
+    /// Characters whose lowercase has another length, before or at a match
+    /// (homology#2: `"ȺȺK"` searched for `k` cut the line inside a
+    /// character and ended the runner).
+    #[test]
+    fn lowercasing_that_changes_lengths_still_finds_by_character() {
+        assert_eq!(found_in("ȺȺK", "k", false), [3]);
+        assert_eq!(found_in("ȺȺK", "k", true), Vec::<usize>::new());
+        assert_eq!(found_in("İstanbul İ", "i", false), [1, 10], "İ lowercases to i and a dot");
+        assert_eq!(found_in("ΣΑΣ σας", "σ", false), [1, 3, 5], "a final ς is not σ");
+        assert_eq!(found_in("aaaa", "aa", true), [1, 3], "matches do not overlap");
+        let temporary = tempfile::tempdir().unwrap();
+        std::fs::write(temporary.path().join("u.py"), "x = 'ȺȺK'\n").unwrap();
+        let found = search(temporary.path(), "k", false).unwrap();
+        assert_eq!((found["matches"][0]["line"].as_u64(), found["matches"][0]["col"].as_u64()), (Some(1), Some(8)));
     }
 
     /// The explorer's operations (2026-11-06): within the directory only,

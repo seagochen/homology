@@ -42,6 +42,10 @@ cargo test --workspace
 scripts/build-runners.sh     # 改了 homology-runner 或它的依赖时：两个架构的静态构建
 ```
 
+`cargo test` 包括属性测试（`crates/homology-runner/src/properties.rs`，proptest）。改了协议解析、路径规则、文件操作或读行时，相应的属性也要跟着改；随机找到的失败先修，再把最小反例写成固定的回归测试。
+
+`fuzz/`（cargo-fuzz，独立 workspace，不进 runner）在改了协议、`serve` 或程序输出的解析之后手动跑：`cargo +nightly fuzz run <target> -- -max_total_time=600`，target 见 `cargo +nightly fuzz list`。`serve` target 会先把 `hello`、`ping`、`shutdown` 以外的请求改成不存在的操作，fuzz 不会动本机的文件；新增 target 时保持这一点。
+
 CI（`.github/workflows/ci.yml`）在 Linux、Windows、macOS 上跑上面前三项，并在 Linux 和 macOS 上跑 `scripts/build-runners.sh`；推送前本机先跑过，CI 不是第一次检查。
 
 在 AnnotaryCat 中改动 Homology 时：先在本仓库提交并推送到 `main`，再在 AnnotaryCat 中提交 submodule 的新提交；两边的测试都要通过。

@@ -128,9 +128,7 @@ fn conda(places: &Places) -> Vec<Found> {
     }
     if let Some(home) = &places.home {
         if let Ok(listed) = std::fs::read_to_string(home.join(".conda/environments.txt")) {
-            prefixes.extend(
-                listed.lines().map(str::trim).filter(|line| !line.is_empty()).map(|line| (PathBuf::from(line), false)),
-            );
+            prefixes.extend(listed_environments(&listed).into_iter().map(|prefix| (prefix, false)));
         }
     }
     prefixes.extend(places.var("CONDA_PREFIX").map(|prefix| (prefix, false)));
@@ -145,6 +143,12 @@ fn conda(places: &Places) -> Vec<Found> {
             Some(Found { kind: "conda", name, python })
         })
         .collect()
+}
+
+/// The prefixes conda's `environments.txt` lists: one a line, blank lines
+/// and surrounding spaces left out.
+pub fn listed_environments(text: &str) -> Vec<PathBuf> {
+    text.lines().map(str::trim).filter(|line| !line.is_empty()).map(PathBuf::from).collect()
 }
 
 /// Virtual environments: `~/.virtualenvs/*` and each root's `.venv`.
@@ -242,6 +246,11 @@ print("HOMOLOGY-PROBE " + json.dumps(out))
 /// The default time a probe may take (torch and CUDA can be slow to load).
 pub const PROBE_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// The most of a program's stdout or stderr kept ([`run_with`]): the rest
+/// is read and dropped, so the program never blocks on a full pipe and the
+/// runner's memory stays bounded (homology#2).
+pub const MAX_OUTPUT: u64 = 16 * 1024 * 1024;
+
 /// Run `command` for at most `timeout`; its stdout, or why not.
 fn run_for(command: &mut Command, timeout: Duration) -> Result<String, String> {
     run_with(command, None, timeout)
@@ -266,7 +275,8 @@ pub fn run_with(command: &mut Command, input: Option<Vec<u8>>, timeout: Duration
         std::thread::spawn(move || {
             let mut text = Vec::new();
             if let Some(mut pipe) = pipe {
-                let _ = pipe.read_to_end(&mut text);
+                let _ = (&mut pipe).take(MAX_OUTPUT).read_to_end(&mut text);
+                let _ = std::io::copy(&mut pipe, &mut std::io::sink());
             }
             String::from_utf8_lossy(&text).into_owned()
         })
@@ -302,7 +312,12 @@ fn probe_once(python: &Path, torch: bool, timeout: Duration) -> Result<Value, St
     if torch {
         command.arg("--torch");
     }
-    let output = run_for(&mut command, timeout)?;
+    answer_of(&run_for(&mut command, timeout)?)
+}
+
+/// The probe's answer in what it printed: the JSON after [`MARKER`] on the
+/// first line that has it.
+pub fn answer_of(output: &str) -> Result<Value, String> {
     let line =
         output.lines().find_map(|line| line.strip_prefix(MARKER)).ok_or_else(|| "it printed no answer".to_string())?;
     serde_json::from_str(line).map_err(|error| format!("its answer is not JSON: {error}"))
@@ -312,7 +327,13 @@ fn probe_once(python: &Path, torch: bool, timeout: Duration) -> Result<Value, St
 fn nvidia_smi() -> Option<Value> {
     let mut command = crate::sys::command("nvidia-smi");
     command.args(["--query-gpu=name,memory.total", "--format=csv,noheader,nounits"]);
-    let output = run_for(&mut command, Duration::from_secs(10)).ok()?;
+    gpus_of(&run_for(&mut command, Duration::from_secs(10)).ok()?)
+}
+
+/// The GPUs in what `nvidia-smi --query-gpu=name,memory.total
+/// --format=csv,noheader,nounits` printed: `[{name, memory_mb}]` (`null`
+/// memory when it is not a number), `None` when there is none.
+pub fn gpus_of(output: &str) -> Option<Value> {
     let gpus: Vec<Value> = output
         .lines()
         .filter_map(|line| {

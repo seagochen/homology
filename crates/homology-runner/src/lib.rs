@@ -23,6 +23,8 @@ pub mod check;
 pub mod client;
 pub mod env;
 pub mod fs;
+#[cfg(test)]
+mod properties;
 pub mod protocol;
 pub mod python;
 pub mod server;

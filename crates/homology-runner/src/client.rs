@@ -9,7 +9,7 @@
 //! behind, and every later request fails with the same error.
 
 use std::collections::VecDeque;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufReader, Read, Write};
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
@@ -19,8 +19,8 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 
 use crate::protocol::{
-    Message, Request, RunnerError, RunnerResult, PROTOCOL, PROTOCOL_MISMATCH, RUNNER_EXITED, RUNNER_INVALID_OUTPUT,
-    RUNNER_IO, RUNNER_START_FAILED, RUNNER_TIMEOUT, VERSION,
+    read_line, Line, Message, Request, RunnerError, RunnerResult, MAX_LINE, PROTOCOL, PROTOCOL_MISMATCH, RUNNER_EXITED,
+    RUNNER_INVALID_OUTPUT, RUNNER_IO, RUNNER_START_FAILED, RUNNER_TIMEOUT, VERSION,
 };
 use crate::JsonMap;
 
@@ -64,10 +64,16 @@ impl Client {
         let mut readers = Vec::new();
         if let Some(stdout) = child.stdout.take() {
             readers.push(std::thread::spawn(move || {
-                for line in BufReader::new(stdout).lines() {
-                    let message = match line {
-                        Ok(line) if line.trim().is_empty() => continue,
-                        Ok(line) => Message::parse(&line),
+                let mut stdout = BufReader::new(stdout);
+                loop {
+                    let message = match read_line(&mut stdout, MAX_LINE) {
+                        Ok(None) => break,
+                        Ok(Some(Line::Text(line))) if line.trim().is_empty() => continue,
+                        Ok(Some(Line::Text(line))) => Message::parse(&line),
+                        Ok(Some(Line::TooLong)) => Err(RunnerError::new(
+                            RUNNER_INVALID_OUTPUT,
+                            format!("the runner wrote a line over {MAX_LINE} bytes"),
+                        )),
                         Err(error) => Err(RunnerError::new(
                             RUNNER_INVALID_OUTPUT,
                             format!("could not read the runner's output: {error}"),
