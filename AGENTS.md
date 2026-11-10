@@ -22,6 +22,7 @@ Homology 是 AnnotaryCat 和 Crescent 共用的 runner 与远程访问层。它�
 - 写文件只覆盖调用方打开时的版本（sha256），经临时文件再改名，从不写一半。
 - 写文件一律用 `homology_sys::atomic_write_bytes`（或 `temporary_beside`）：临时文件名随机、只在没有任何东西时独占创建（`create_new`），从不打开或跟随目录里已有的文件与符号链接（#3）；不要自己拼 `<名>.tmp`。
 - 消息、日志和错误信息里从不出现密码、私钥或令牌。
+- 检查：`crates/homology-ssh/tests/secrets.rs` 用假的 `ssh` 走一遍密码登录和登录密钥的设置，确认密码不出现在 ssh 的参数、环境、stdin、任何文件和错误里，私钥不到服务器。改了密码、askpass 或登录密钥的流程时，这个检查要跟着覆盖新的路径。
 
 ## 4. 不 panic
 
