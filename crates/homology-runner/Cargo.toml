@@ -1,0 +1,22 @@
+[package]
+name = "homology-runner"
+description = "The runner: JSON lines over stdin and stdout, on this computer or a user's SSH host; files, and the server and client of the protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "homology-runner"
+path = "src/main.rs"
+
+[dependencies]
+serde_json.workspace = true
+sha2.workspace = true
+hex.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

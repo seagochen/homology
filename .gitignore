@@ -1,0 +1,8 @@
+/target/
+
+# Ignore AI generated files
+.claude/
+.codex/
+
+# Ignore shenshi generated files
+.shenshi/

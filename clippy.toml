@@ -1,0 +1,4 @@
+# Panicking shortcuts are allowed in tests only (AGENTS.md, 不 panic).
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true

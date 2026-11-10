@@ -1,0 +1,5 @@
+# Lines up to 120 columns, so code reads without scrolling sideways (also
+# side by side in a diff); short lists (keywords, extensions) several to a line.
+max_width = 120
+use_small_heuristics = "Max"
+short_array_element_width_threshold = 24

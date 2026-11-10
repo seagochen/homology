@@ -1,0 +1,36 @@
+[workspace]
+resolver = "2"
+members = ["crates/homology-runner"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.87"
+publish = false
+
+[workspace.dependencies]
+homology-runner = { path = "crates/homology-runner" }
+
+serde_json = { version = "1", features = ["preserve_order"] }
+sha2 = "0.10"
+hex = "0.4"
+tempfile = "3"
+
+# No panicking shortcuts and no unsafe code outside tests (AGENTS.md).
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+dbg_macro = "warn"
+todo = "deny"
+unimplemented = "deny"
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+unreachable = "deny"
+
+# The runner is uploaded to the user's hosts: small and static.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
