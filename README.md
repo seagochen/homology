@@ -23,13 +23,17 @@ homology-ssh      lib         the system ssh in batch mode: targets, scripts and
                               login keys for hosts that take only a password
 homology          lib         the caller's side: a program's runners carried for SSH hosts, placed on a
                               host by their hash and talked to over ssh … serve, one session per host
+                              console: a shell or an interactive Python on this computer or a host,
+                              read back by offset, interrupted as Ctrl+C would
 ```
 
 A program gives `homology-ssh` its names (`App`: its askpass helper, its
 login keys' comment, the prefix of the variables it reads), and `homology`
 the runner it deploys (`Program`: its name, version, folder in a host's
-cache, the prefix of the variables that point at other runners). Coming in
-the next steps: the console, and building `homology-runner` on its own.
+cache, the prefix of the variables that point at other runners). A console
+on a host takes the program's own session type, any that holds
+`homology-ssh`'s `Context` (`AsRef`). Coming in the next step: building
+`homology-runner` on its own.
 
 Files are written so that a reader sees the old content or the new, never
 half of it: through a temporary file beside them with a random name, made

@@ -6,12 +6,15 @@
 //! - [`deploy`]: a runner on an SSH host, placed once per version in the
 //!   host's cache, checked by its hash, talked to over `ssh … serve`.
 //! - [`Pool`]: one session per host, kept between requests.
+//! - [`console`]: a shell or an interactive Python on this computer or a
+//!   host, read back by offset, interrupted as a terminal would.
 //!
 //! A program says which runner it deploys and where it keeps it with a
 //! [`Program`]: its own (`annotarycat-runner` with its operations) or
 //! Homology's plain `homology-runner`.
 
 pub mod bundle;
+pub mod console;
 pub mod deploy;
 mod pool;
 

@@ -1,6 +1,6 @@
 [package]
 name = "homology"
-description = "The caller's side of Homology: a program's runners carried for SSH hosts, placed on a host by their hash and talked to, one session per host kept between requests"
+description = "The caller's side of Homology: a program's runners carried for SSH hosts, placed on a host by their hash and talked to, one session per host kept between requests, and consoles on this computer or a host"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -14,6 +14,8 @@ homology-runner.workspace = true
 homology-ssh.workspace = true
 sha2.workspace = true
 hex.workspace = true
+homology-sys.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 homology-runner = { workspace = true, features = ["testing"] }

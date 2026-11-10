@@ -48,6 +48,14 @@ pub struct Context {
     keys_dir: RwLock<Option<PathBuf>>,
 }
 
+/// A caller's own session type that holds one (and adds its own settings)
+/// stands for it through `AsRef`, as this one does for itself.
+impl AsRef<Context> for Context {
+    fn as_ref(&self) -> &Context {
+        self
+    }
+}
+
 impl Context {
     /// A session of `app`'s, with the user's own configuration and no keys
     /// directory yet.

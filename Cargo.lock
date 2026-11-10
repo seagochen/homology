@@ -156,8 +156,10 @@ dependencies = [
  "hex",
  "homology-runner",
  "homology-ssh",
+ "homology-sys",
  "sha2",
  "tempfile",
+ "uuid",
 ]
 
 [[package]]
