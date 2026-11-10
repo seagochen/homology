@@ -31,6 +31,11 @@ the runner it deploys (`Program`: its name, version, folder in a host's
 cache, the prefix of the variables that point at other runners). Coming in
 the next steps: the console, and building `homology-runner` on its own.
 
+Files are written so that a reader sees the old content or the new, never
+half of it: through a temporary file beside them with a random name, made
+only where nothing is yet, so a link someone left in the folder is never
+written through (#3).
+
 ## Protocol
 
 One JSON object per line, UTF-8, over the runner's stdin and stdout:

@@ -507,7 +507,11 @@ mod tests {
             CODE_CONFLICT
         );
         assert!(!dir.path().join("src/new/model.py").exists());
-        assert!(!dir.path().join("src/train.py.tmp").exists());
+        let left = std::fs::read_dir(dir.path().join("src")).unwrap().flatten();
+        assert!(
+            !left.into_iter().any(|entry| entry.file_name().to_string_lossy().ends_with(".tmp")),
+            "a temporary file is left"
+        );
     }
 
     #[cfg(unix)]

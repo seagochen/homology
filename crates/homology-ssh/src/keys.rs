@@ -428,4 +428,25 @@ mod tests {
             "{comment}"
         );
     }
+
+    /// The program's host list is not written through a link left at the
+    /// old temporary name (#3).
+    #[cfg(unix)]
+    #[test]
+    fn the_host_list_is_not_written_through_a_link() {
+        let base = tempfile::tempdir().unwrap();
+        let (directory, outside) = (base.path().join("keys"), base.path().join("outside.json"));
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(&outside, "ORIGINAL").unwrap();
+        std::os::unix::fs::symlink(&outside, directory.join(format!("{HOSTS}.tmp"))).unwrap();
+        let dangling = base.path().join("made.json");
+        std::os::unix::fs::symlink(&dangling, directory.join(format!(".{HOSTS}.tmp"))).unwrap();
+
+        write_hosts(&directory, &[]).unwrap();
+
+        assert_eq!(std::fs::read_to_string(&outside).unwrap(), "ORIGINAL");
+        assert!(!dangling.exists());
+        assert!(std::fs::symlink_metadata(directory.join(HOSTS)).unwrap().file_type().is_file());
+        assert!(read_hosts(&directory).is_empty());
+    }
 }
