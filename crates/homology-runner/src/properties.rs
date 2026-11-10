@@ -8,14 +8,18 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+#[cfg(unix)]
 use std::collections::BTreeMap;
 use std::io::{BufReader, Cursor};
+#[cfg(unix)]
 use std::path::Path;
 
 use proptest::prelude::*;
 use serde_json::{json, Value};
 
-use crate::fs::{self, folded, found_in, is_relative, CODE_CONFLICT, CODE_PATH_INVALID};
+#[cfg(unix)]
+use crate::fs::CODE_CONFLICT;
+use crate::fs::{self, folded, found_in, is_relative, CODE_PATH_INVALID};
 use crate::protocol::{
     read_line, Line, Message, Request, RunnerError, HELLO_REQUIRED, INVALID_MESSAGE, PROTOCOL, RUNNER_INVALID_OUTPUT,
 };
@@ -78,6 +82,7 @@ proptest! {
 
 /// What a random folder holds, besides the folder `d` it always has.
 #[derive(Clone, Debug)]
+#[cfg(unix)]
 enum Made {
     Dir,
     File(String),
@@ -97,6 +102,7 @@ enum Made {
 
 /// One operation on the folder.
 #[derive(Clone, Debug)]
+#[cfg(unix)]
 enum Op {
     Write(String, String, bool),
     Mkdir(String),
@@ -108,6 +114,7 @@ enum Op {
 /// A path among the names a random folder has, sometimes one it does not.
 /// Mostly one part: the names a random folder's entries and their
 /// temporary-looking neighbours (`a.tmp`) are about.
+#[cfg(unix)]
 fn a_path() -> impl Strategy<Value = String> {
     let part = prop_oneof![Just("a"), Just("b"), Just("d"), Just("l"), Just("x"), Just("..")];
     prop_oneof![
@@ -118,11 +125,13 @@ fn a_path() -> impl Strategy<Value = String> {
 
 /// The names a random folder's entries get: half of them where a write
 /// of `a` or `b` once put its temporary file (homology#3).
+#[cfg(unix)]
 fn an_entry_name() -> impl Strategy<Value = &'static str> {
     prop_oneof![Just("a"), Just("b"), Just("l"), Just("x"), Just("a.tmp"), Just("b.tmp"), Just("a.tmp"), Just("b.tmp")]
 }
 
 /// Any kind of entry.
+#[cfg(unix)]
 fn made() -> impl Strategy<Value = Made> {
     prop_oneof![
         Just(Made::Dir),
@@ -137,6 +146,7 @@ fn made() -> impl Strategy<Value = Made> {
 }
 
 /// Any operation on the folder's names.
+#[cfg(unix)]
 fn op() -> impl Strategy<Value = Op> {
     prop_oneof![
         (a_path(), "[a-z]{0,6}", any::<bool>()).prop_map(|(path, text, stale)| Op::Write(path, text, stale)),
@@ -149,6 +159,7 @@ fn op() -> impl Strategy<Value = Op> {
 
 /// Everything under `dir`, links not followed: each path with its kind and
 /// content (a file's bytes, a link's target).
+#[cfg(unix)]
 fn snapshot(dir: &Path) -> BTreeMap<String, String> {
     let mut seen = BTreeMap::new();
     let mut stack = vec![dir.to_path_buf()];
