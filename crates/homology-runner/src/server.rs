@@ -19,9 +19,6 @@ use crate::protocol::{
 };
 use crate::JsonMap;
 
-/// Moved to [`crate::params`]; kept here for callers that import them from `server`.
-pub use crate::params::{host_path, strings, text};
-
 /// The operations every runner answers, as `hello` lists them.
 pub const OPS: &[&str] = &[
     "hello", "ping", "shutdown", "fs.list", "fs.read", "fs.write", "fs.mkdir", "fs.move", "fs.copy", "fs.delete",
