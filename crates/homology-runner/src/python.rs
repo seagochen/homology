@@ -1,5 +1,7 @@
 //! The Python the runner brings to the user's environments: the code
-//! check (`python/homology_check.py`) and the pyflakes it bundles, with
+//! check (`python/homology_check.py`) and the pyflakes it bundles, the
+//! completion (`python/homology_complete.py`) and the jedi and parso it
+//! bundles (homology#14), with
 //! whatever files the program serving the runner adds (its rules, its own
 //! package). It is part of the program and written once per version into
 //! the cache's `python/<version>-<hash>/`; nothing is installed into the
@@ -13,14 +15,7 @@ use sha2::{Digest, Sha256};
 /// A file of the folder: its `/`-separated path in it, and its bytes.
 pub type File = (&'static str, &'static [u8]);
 
-/// Homology's own files.
-pub const FILES: &[File] = &[
-    ("homology_check.py", include_bytes!("../python/homology_check.py")),
-    ("vendor/pyflakes/__init__.py", include_bytes!("../python/vendor/pyflakes/__init__.py")),
-    ("vendor/pyflakes/checker.py", include_bytes!("../python/vendor/pyflakes/checker.py")),
-    ("vendor/pyflakes/messages.py", include_bytes!("../python/vendor/pyflakes/messages.py")),
-    ("vendor/pyflakes/LICENSE", include_bytes!("../python/vendor/pyflakes/LICENSE")),
-];
+include!(concat!(env!("OUT_DIR"), "/python_files.rs"));
 
 /// The folder in `cache` holding [`FILES`] and `more`, written when this
 /// `version` with these files has none; why not. Its name carries a hash

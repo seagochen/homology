@@ -15,7 +15,9 @@
 //! - [`env`]: the Python environments on the runner's computer, found and
 //!   probed without running the user's code.
 //! - [`check`]: code checked in its environment, never run, with the rules
-//!   of the program serving the runner; [`python`]: the checker's Python.
+//!   of the program serving the runner; [`complete`]: what may follow the
+//!   cursor, as that environment reads the code (jedi); [`python`]: the
+//!   Python the two bring.
 //! - [`toolchain`]: compilers and toolchains (C, CUDA, Rust, Node) on the
 //!   runner's computer, found without running them and probed for their
 //!   version; [`exec`]: a command run in a folder for its exit code and
@@ -27,6 +29,7 @@
 
 pub mod check;
 pub mod client;
+pub mod complete;
 pub mod env;
 pub mod exec;
 pub mod fs;

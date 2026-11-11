@@ -23,6 +23,7 @@ use crate::JsonMap;
 pub const OPS: &[&str] = &[
     "hello", "ping", "shutdown", "fs.list", "fs.read", "fs.write", "fs.mkdir", "fs.move", "fs.copy", "fs.delete",
     "fs.search", "env.discover", "env.probe", "code.check", "toolchain.discover", "toolchain.probe", "code.exec",
+    "code.complete",
 ];
 
 /// A runner as a program serves it: its name and version, as `hello` gives
@@ -79,6 +80,7 @@ impl Runner {
             "toolchain.discover" => return Ok(toolchain_discover()),
             "toolchain.probe" => return crate::toolchain::probe_op(params),
             "code.exec" => return crate::exec::op(params),
+            "code.complete" => return crate::complete::run(self, &crate::complete::asked(params)?),
             op if op.starts_with("fs.") && OPS.contains(&op) => return crate::fs::op(op, params),
             _ => {}
         }
