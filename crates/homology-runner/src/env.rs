@@ -245,6 +245,8 @@ print("HOMOLOGY-PROBE " + json.dumps(out))
 
 /// The default time a probe may take (torch and CUDA can be slow to load).
 pub const PROBE_TIMEOUT: Duration = Duration::from_secs(30);
+/// The longest `env.probe` may be asked to wait.
+pub const MAX_PROBE_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// The most of a program's stdout or stderr kept ([`run_with`]): the rest
 /// is read and dropped, so the program never blocks on a full pipe and the

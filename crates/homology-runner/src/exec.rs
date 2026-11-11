@@ -195,14 +195,7 @@ pub fn asked(params: &JsonMap) -> RunnerResult<Asked> {
         .iter()
         .map(|folder| crate::params::host_path(folder))
         .collect::<RunnerResult<_>>()?;
-    let timeout = match params.get("timeout_secs") {
-        None | Some(Value::Null) => TIMEOUT,
-        Some(value) => value
-            .as_u64()
-            .map(Duration::from_secs)
-            .filter(|timeout| !timeout.is_zero() && *timeout <= MAX_TIMEOUT)
-            .ok_or_else(|| RunnerError::new(INVALID_PARAMS, "timeout_secs is 1 to 600"))?,
-    };
+    let timeout = crate::params::timeout_secs(params, TIMEOUT, MAX_TIMEOUT)?;
     Ok(Asked { dir, command: command.to_string(), path_first, timeout })
 }
 

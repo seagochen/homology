@@ -133,14 +133,7 @@ fn env_probe(params: &JsonMap) -> RunnerResult<Value> {
         .and_then(Value::as_str)
         .filter(|python| !python.is_empty())
         .ok_or_else(|| RunnerError::new(INVALID_PARAMS, "env.probe needs python, the interpreter's path"))?;
-    let timeout = match params.get("timeout_secs") {
-        None | Some(Value::Null) => crate::env::PROBE_TIMEOUT,
-        Some(value) => value
-            .as_u64()
-            .filter(|secs| (1..=600).contains(secs))
-            .map(std::time::Duration::from_secs)
-            .ok_or_else(|| RunnerError::new(INVALID_PARAMS, "timeout_secs is 1 to 600"))?,
-    };
+    let timeout = crate::params::timeout_secs(params, crate::env::PROBE_TIMEOUT, crate::env::MAX_PROBE_TIMEOUT)?;
     Ok(crate::env::probe(Path::new(python), timeout))
 }
 

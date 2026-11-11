@@ -88,14 +88,7 @@ pub fn asked(params: &JsonMap) -> RunnerResult<Asked> {
         .filter(|python| !python.is_empty())
         .ok_or_else(|| RunnerError::new(INVALID_PARAMS, "code.check needs python, the interpreter's path"))?;
     let files = files_of(params.get("files"))?;
-    let timeout = match params.get("timeout_secs") {
-        None | Some(Value::Null) => TIMEOUT,
-        Some(value) => value
-            .as_u64()
-            .map(Duration::from_secs)
-            .filter(|timeout| !timeout.is_zero() && *timeout <= MAX_TIMEOUT)
-            .ok_or_else(|| RunnerError::new(INVALID_PARAMS, "timeout_secs is 1 to 600"))?,
-    };
+    let timeout = crate::params::timeout_secs(params, TIMEOUT, MAX_TIMEOUT)?;
     Ok(Asked { python: PathBuf::from(python), files, listing: crate::params::strings(params, "listing")?, timeout })
 }
 

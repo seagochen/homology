@@ -21,6 +21,8 @@ use crate::{JsonMap, RunnerError, RunnerResult};
 pub const TOOLCHAIN_PROBE_FAILED: &str = "toolchain_probe_failed";
 /// The time a probe may take when the caller does not say.
 pub const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
+/// The longest `toolchain.probe` may be asked to wait.
+pub const MAX_PROBE_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// The programs looked for: their kind and their name.
 #[rustfmt::skip] // One kind a line reads as the table it is.
@@ -191,14 +193,7 @@ pub fn probe_op(params: &JsonMap) -> RunnerResult<Value> {
     if !runnable(&path) {
         return Err(RunnerError::new(INVALID_PARAMS, format!("{} is not a program", path.display())));
     }
-    let timeout = match params.get("timeout_secs") {
-        None | Some(Value::Null) => PROBE_TIMEOUT,
-        Some(value) => value
-            .as_u64()
-            .filter(|secs| (1..=600).contains(secs))
-            .map(Duration::from_secs)
-            .ok_or_else(|| RunnerError::new(INVALID_PARAMS, "timeout_secs is 1 to 600"))?,
-    };
+    let timeout = crate::params::timeout_secs(params, PROBE_TIMEOUT, MAX_PROBE_TIMEOUT)?;
     probe(&path, timeout)
 }
 
