@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use serde_json::{json, Value};
 
 use crate::protocol::{RunnerError, RunnerResult, INVALID_PARAMS, UNKNOWN_OP};
-use crate::JsonMap;
+use crate::{params, JsonMap};
 
 /// The codes the file operations on a directory fail with.
 pub const CODE_NOT_FOUND: &str = "code_not_found";
@@ -395,13 +395,8 @@ pub fn search(root: &Path, query: &str, match_case: bool) -> RunnerResult<Value>
 /// Answer `fs.*`: the runner's operation, and what a caller calls directly
 /// for a directory on its own computer.
 pub fn op(op: &str, params: &JsonMap) -> RunnerResult<Value> {
-    let text = |key: &str| {
-        params
-            .get(key)
-            .and_then(Value::as_str)
-            .ok_or_else(|| RunnerError::new(INVALID_PARAMS, format!("{key} is text")))
-    };
-    let root = crate::server::host_path(text("root")?)?;
+    let text = |key: &str| params::text(params, key);
+    let root = params::host_path(text("root")?)?;
     match op {
         "fs.list" => list(&root),
         "fs.read" => read(&root, text("path")?),

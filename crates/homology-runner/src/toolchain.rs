@@ -187,7 +187,7 @@ pub fn probe(path: &Path, timeout: Duration) -> RunnerResult<Value> {
 
 /// `toolchain.probe`'s params: `{path, timeout_secs?}`.
 pub fn probe_op(params: &JsonMap) -> RunnerResult<Value> {
-    let path = crate::server::host_path(crate::server::text(params, "path")?)?;
+    let path = crate::params::host_path(crate::params::text(params, "path")?)?;
     if !runnable(&path) {
         return Err(RunnerError::new(INVALID_PARAMS, format!("{} is not a program", path.display())));
     }

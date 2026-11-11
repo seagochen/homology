@@ -183,17 +183,17 @@ pub struct Asked {
 /// `code.exec`'s params, checked: `{dir, command, path_first?: [dir],
 /// timeout_secs?}`.
 pub fn asked(params: &JsonMap) -> RunnerResult<Asked> {
-    let dir = crate::server::host_path(crate::server::text(params, "dir")?)?;
+    let dir = crate::params::host_path(crate::params::text(params, "dir")?)?;
     if !dir.is_dir() {
         return Err(RunnerError::new(INVALID_PARAMS, format!("{} is not a folder", dir.display())));
     }
-    let command = crate::server::text(params, "command")?;
+    let command = crate::params::text(params, "command")?;
     if command.trim().is_empty() {
         return Err(RunnerError::new(INVALID_PARAMS, "command is empty"));
     }
-    let path_first = crate::server::strings(params, "path_first")?
+    let path_first = crate::params::strings(params, "path_first")?
         .iter()
-        .map(|folder| crate::server::host_path(folder))
+        .map(|folder| crate::params::host_path(folder))
         .collect::<RunnerResult<_>>()?;
     let timeout = match params.get("timeout_secs") {
         None | Some(Value::Null) => TIMEOUT,

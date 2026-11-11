@@ -96,7 +96,7 @@ pub fn asked(params: &JsonMap) -> RunnerResult<Asked> {
             .filter(|timeout| !timeout.is_zero() && *timeout <= MAX_TIMEOUT)
             .ok_or_else(|| RunnerError::new(INVALID_PARAMS, "timeout_secs is 1 to 600"))?,
     };
-    Ok(Asked { python: PathBuf::from(python), files, listing: crate::server::strings(params, "listing")?, timeout })
+    Ok(Asked { python: PathBuf::from(python), files, listing: crate::params::strings(params, "listing")?, timeout })
 }
 
 /// Check `files` with the interpreter at `python` and the checker of

@@ -8,6 +8,8 @@
 //! - [`server`]: the runner's side, with the operations a program adds of
 //!   its own ([`server::Runner`]).
 //! - [`client`]: the caller's side, over the pipes of any child process.
+//! - [`params`]: request params checked, shared by the operation modules
+//!   and independent of the session.
 //! - [`fs`]: a directory's files, for an editor: listed, read, written only
 //!   over what was opened, searched.
 //! - [`env`]: the Python environments on the runner's computer, found and
@@ -28,6 +30,7 @@ pub mod client;
 pub mod env;
 pub mod exec;
 pub mod fs;
+pub mod params;
 #[cfg(test)]
 mod properties;
 pub mod protocol;

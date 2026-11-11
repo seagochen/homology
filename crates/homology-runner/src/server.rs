@@ -19,6 +19,9 @@ use crate::protocol::{
 };
 use crate::JsonMap;
 
+/// Moved to [`crate::params`]; kept here for callers that import them from `server`.
+pub use crate::params::{host_path, strings, text};
+
 /// The operations every runner answers, as `hello` lists them.
 pub const OPS: &[&str] = &[
     "hello", "ping", "shutdown", "fs.list", "fs.read", "fs.write", "fs.mkdir", "fs.move", "fs.copy", "fs.delete",
@@ -277,40 +280,6 @@ fn hello(runner: &Runner, params: &JsonMap, claim_other: bool) -> RunnerResult<V
     }
     let protocol = if claim_other { PROTOCOL + 98 } else { PROTOCOL };
     Ok(json!({"protocol": protocol, "name": runner.name, "version": runner.version, "ops": runner.ops()}))
-}
-
-/// A path the caller names on the runner's computer: absolute, or `~/…`
-/// in the home folder.
-pub fn host_path(text: &str) -> RunnerResult<PathBuf> {
-    let expanded = match text.strip_prefix("~/") {
-        Some(rest) => std::env::var("HOME")
-            .map(|home| format!("{home}/{rest}"))
-            .map_err(|_| RunnerError::new(INVALID_PARAMS, "no HOME for ~/"))?,
-        None if text == "~" => std::env::var("HOME").map_err(|_| RunnerError::new(INVALID_PARAMS, "no HOME for ~"))?,
-        None => text.to_string(),
-    };
-    let path = PathBuf::from(expanded);
-    if path.is_absolute() {
-        Ok(path)
-    } else {
-        Err(RunnerError::new(INVALID_PARAMS, format!("{text:?} is not an absolute path")))
-    }
-}
-
-/// The list of text at `key`; empty when absent (`invalid_params` when it is
-/// not a list of text).
-pub fn strings(params: &JsonMap, key: &str) -> RunnerResult<Vec<String>> {
-    params
-        .get(key)
-        .and_then(Value::as_array)
-        .map(|items| items.iter().map(|item| item.as_str().map(str::to_string)).collect::<Option<Vec<_>>>())
-        .unwrap_or(Some(Vec::new()))
-        .ok_or_else(|| RunnerError::new(INVALID_PARAMS, format!("{key} is a list of text")))
-}
-
-/// The text at `key` (`invalid_params` when it is missing or not text).
-pub fn text<'p>(params: &'p JsonMap, key: &str) -> RunnerResult<&'p str> {
-    params.get(key).and_then(Value::as_str).ok_or_else(|| RunnerError::new(INVALID_PARAMS, format!("{key} is text")))
 }
 
 /// Write one message as a line and flush it, so the app reads it at once.
