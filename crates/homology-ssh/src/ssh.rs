@@ -9,7 +9,7 @@ use std::process::Command;
 use homology_sys as sys;
 
 use crate::askpass::{self, Password};
-use crate::keys;
+use crate::logins;
 use crate::target::SshTarget;
 use crate::{Context, SshError, SshResult};
 
@@ -86,7 +86,7 @@ pub enum Login<'a> {
 
 /// `-i <key>` when the program set up a login key for `target`.
 pub fn identity_args(cx: &Context, target: &SshTarget) -> Vec<std::ffi::OsString> {
-    keys::identity(cx, target).map(|key| vec!["-i".into(), key.into_os_string()]).unwrap_or_default()
+    logins::identity(cx, target).map(|key| vec!["-i".into(), key.into_os_string()]).unwrap_or_default()
 }
 
 /// Run `script` (a POSIX shell command line) on the host; its stdout.
@@ -300,8 +300,8 @@ mod tests {
         }
         let keys = tempfile::tempdir().unwrap();
         one.set_keys_dir(keys.path().to_path_buf());
-        assert_eq!(keys::list(&one).unwrap(), []);
-        assert_eq!(keys::list(&other).unwrap_err().code, "ssh_keys_unavailable");
+        assert_eq!(logins::directory(&one).unwrap(), keys.path());
+        assert_eq!(logins::directory(&other).unwrap_err().code, "ssh_keys_unavailable");
     }
 
     #[test]

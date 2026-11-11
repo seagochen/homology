@@ -23,6 +23,7 @@ pub mod askpass;
 mod context;
 pub mod host_key;
 pub mod keys;
+mod logins;
 pub mod ssh;
 mod target;
 
