@@ -14,7 +14,8 @@ in it. It writes one JSON object on stdout:
 
     {"completions": [{"name": "path", "complete": "th", "type": "module"}, ...], "python": "3.11.2"}
 
-or `{"error": "..."}` when the position is not in the text.
+or `{"error": "..."}` when the position is not in the text, or
+`{"unsupported": "..."}` in a Python jedi cannot run in (before 3.10).
 """
 
 import json
@@ -22,6 +23,11 @@ import os
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+
+if sys.version_info < (3, 10):
+    json.dump({"unsupported": "code completion needs Python 3.10 or later, this environment has %d.%d" % sys.version_info[:2]}, sys.stdout)
+    sys.exit(0)
+
 sys.path.insert(0, os.path.join(HERE, "vendor"))
 
 import jedi  # noqa: E402

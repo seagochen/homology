@@ -129,6 +129,9 @@ pub fn run(runner: &Runner, asked: &Asked) -> RunnerResult<Value> {
         })?;
     let answer: Value = serde_json::from_str(output.trim())
         .map_err(|error| failed(format!("the completion's answer is not JSON: {error}")))?;
+    if let Some(why) = answer.get("unsupported").and_then(Value::as_str) {
+        return Err(failed(why.to_string()));
+    }
     if let Some(error) = answer.get("error").and_then(Value::as_str) {
         return Err(RunnerError::new(INVALID_PARAMS, format!("line and column: {error}")));
     }

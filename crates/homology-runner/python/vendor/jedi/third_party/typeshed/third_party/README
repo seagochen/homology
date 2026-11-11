@@ -1,3 +1,0 @@
-Homology leaves typeshed's third-party stubs out to keep the runner small:
-the packages installed in the environment are read instead. jedi lists this
-folder, so it is kept.

@@ -15,7 +15,7 @@ from jedi import debug
 from jedi.api.environment import get_cached_default_environment, create_environment
 from jedi.api.exceptions import WrongVersion
 from jedi.api.completion import search_in_module
-from jedi.api.helpers import split_search_string, get_module_names
+from jedi.api.helpers import split_search_string, get_module_names, recursion_limit_generator
 from jedi.inference.imports import load_module_from_path, \
     load_namespace_from_path, iter_module_names
 from jedi.inference.sys_path import discover_buildout_paths
@@ -86,6 +86,14 @@ class Project:
             version, data = json.load(f)
 
         if version == 1:
+            # A code base must not be able to enable the loading of its own
+            # extensions or point Jedi at a binary to execute, see the docs
+            # about security. The project file can be part of a checked out
+            # repository, so these settings are ignored for loaded projects.
+            if data.pop('load_unsafe_extensions', False):
+                debug.warning('load_unsafe_extensions is ignored for loaded projects')
+            if data.pop('environment_path', None) is not None:
+                debug.warning('environment_path is ignored for loaded projects')
             return cls(**data)
         else:
             raise WrongVersion(
@@ -99,6 +107,11 @@ class Project:
         data = dict(self.__dict__)
         data.pop('_environment', None)
         data.pop('_django', None)  # TODO make django setting public?
+
+        # These are dropped anyway
+        data.pop('_load_unsafe_extensions', None)
+        data.pop('_environment_path', None)
+
         data = {k.lstrip('_'): v for k, v in data.items()}
         data['path'] = str(data['path'])
 
@@ -242,7 +255,10 @@ class Project:
     def get_environment(self):
         if self._environment is None:
             if self._environment_path is not None:
-                self._environment = create_environment(self._environment_path, safe=False)
+                # environment_path can only be set by the user directly, it is
+                # never loaded from a project file, so it is trusted.
+                self._environment = create_environment(
+                    self._environment_path, safe=False)
             else:
                 self._environment = get_cached_default_environment()
         return self._environment
@@ -282,6 +298,7 @@ class Project:
         """
         return self._search_func(string, complete=True, **kwargs)
 
+    @recursion_limit_generator
     @_try_to_skip_duplicates
     def _search_func(self, string, complete=False, all_scopes=False):
         # Using a Script is they easiest way to get an empty module context.

@@ -17,8 +17,6 @@ import re
 from pathlib import Path
 from typing import Optional
 
-from parso.tree import search_ancestor
-
 from jedi import settings
 from jedi import debug
 from jedi.inference.utils import unite
@@ -30,7 +28,7 @@ from jedi.inference.gradual.conversion import convert_names, convert_values
 from jedi.inference.base_value import ValueSet, HasNoContext
 from jedi.api.keywords import KeywordName
 from jedi.api import completion_cache
-from jedi.api.helpers import filter_follow_imports
+from jedi.api.helpers import filter_follow_imports, recursion_limit
 
 
 def _sort_names_by_start_pos(names):
@@ -98,7 +96,7 @@ class BaseName:
     @property
     def module_path(self) -> Optional[Path]:
         """
-        Shows the file path of a module. e.g. ``/usr/lib/python3.9/os.py``
+        Shows the file path of a module. e.g. ``/usr/lib/python3.14/os.py``
         """
         module = self._get_module_context()
         if module.is_stub() or not module.is_compiled():
@@ -264,6 +262,7 @@ class BaseName:
             return last_leaf.end_pos
         return definition.end_pos
 
+    @recursion_limit
     def docstring(self, raw=False, fast=True):
         r"""
         Return a document string for this completion object.
@@ -424,6 +423,7 @@ class BaseName:
         return tree_name.is_definition() and tree_name.parent.type == 'trailer'
 
     @debug.increase_indent_cm('goto on name')
+    @recursion_limit
     def goto(self, *, follow_imports=False, follow_builtin_imports=False,
              only_stubs=False, prefer_stubs=False):
 
@@ -454,6 +454,7 @@ class BaseName:
                 for n in names]
 
     @debug.increase_indent_cm('infer on name')
+    @recursion_limit
     def infer(self, *, only_stubs=False, prefer_stubs=False):
         """
         Like :meth:`.Script.infer`, it can be useful to understand which type
@@ -509,7 +510,7 @@ class BaseName:
             # - param: The parent_context of a param is not its function but
             #   e.g. the outer class or module.
             cls_or_func_node = self._name.tree_name.get_definition()
-            parent = search_ancestor(cls_or_func_node, 'funcdef', 'classdef', 'file_input')
+            parent = cls_or_func_node.search_ancestor('funcdef', 'classdef', 'file_input')
             context = self._get_module_context().create_value(parent).as_context()
         else:
             context = self._name.parent_context
@@ -553,7 +554,7 @@ class BaseName:
         return ''.join(lines[start_index:index + after + 1])
 
     def _get_signatures(self, for_docstring=False):
-        if self._name.api_type == 'property':
+        if self._name.api_type in ('property', 'param'):
             return []
         if for_docstring and self._name.api_type == 'statement' and not self.is_stub():
             # For docstrings we don't resolve signatures if they are simple
@@ -569,6 +570,7 @@ class BaseName:
         names = convert_names([self._name], prefer_stubs=True)
         return [sig for name in names for sig in name.infer().get_signatures()]
 
+    @recursion_limit
     def get_signatures(self):
         """
         Returns all potential signatures for a function or a class. Multiple
@@ -581,6 +583,7 @@ class BaseName:
             for s in self._get_signatures()
         ]
 
+    @recursion_limit
     def execute(self):
         """
         Uses type inference to "execute" this identifier and returns the
@@ -590,6 +593,7 @@ class BaseName:
         """
         return _values_to_definitions(self._name.infer().execute_with_values())
 
+    @recursion_limit
     def get_type_hint(self):
         """
         Returns type hints like ``Iterable[int]`` or ``Union[int, str]``.
@@ -672,6 +676,7 @@ class Completion(BaseName):
         """
         return self._complete(False)
 
+    @recursion_limit
     def docstring(self, raw=False, fast=True):
         """
         Documented under :meth:`BaseName.docstring`.
@@ -754,6 +759,7 @@ class Name(BaseName):
         super().__init__(inference_state, definition)
 
     @memoize_method
+    @recursion_limit
     def defined_names(self):
         """
         List sub-definitions (e.g., methods in class).
@@ -799,6 +805,7 @@ class BaseSignature(Name):
         self._signature = signature
 
     @property
+    @recursion_limit
     def params(self):
         """
         Returns definitions for all parameters that a signature defines.
@@ -809,6 +816,7 @@ class BaseSignature(Name):
         return [ParamName(self._inference_state, n)
                 for n in self._signature.get_param_names(resolve_stars=True)]
 
+    @recursion_limit
     def to_string(self):
         """
         Returns a text representation of the signature. This could for example
@@ -833,7 +841,7 @@ class Signature(BaseSignature):
     def index(self):
         """
         Returns the param index of the current cursor position.
-        Returns None if the index cannot be found in the curent call.
+        Returns None if the index cannot be found in the current call.
 
         :rtype: int
         """
@@ -860,6 +868,7 @@ class Signature(BaseSignature):
 
 
 class ParamName(Name):
+    @recursion_limit
     def infer_default(self):
         """
         Returns default values like the ``1`` of ``def foo(x=1):``.
@@ -868,6 +877,7 @@ class ParamName(Name):
         """
         return _values_to_definitions(self._name.infer_default())
 
+    @recursion_limit
     def infer_annotation(self, **kwargs):
         """
         :param execute_annotation: Default True; If False, values are not
@@ -876,6 +886,7 @@ class ParamName(Name):
         """
         return _values_to_definitions(self._name.infer_annotation(ignore_stars=True, **kwargs))
 
+    @recursion_limit
     def to_string(self):
         """
         Returns a simple representation of a param, like
