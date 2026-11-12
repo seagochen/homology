@@ -3,7 +3,9 @@
 //! code and output the caller reads, diagnostics and all. It runs by the
 //! system's shell, in its own process group, for at most a time limit;
 //! past it, the whole group ends, so what a build started ends with it.
-//! Its stdout and stderr are each kept to [`MAX_OUTPUT`].
+//! Its stdout and stderr are each kept to [`MAX_OUTPUT`]. A caller may add
+//! variables to its environment and give it text on stdin (homology#25),
+//! so that a password or a long script never stands on its command line.
 //!
 //! The command is the caller's, as a console's line is: the runner serves
 //! only its caller, over the user's own pipe or SSH, and whether a command
@@ -106,14 +108,29 @@ fn end_group(leader: u32) {
 /// runs (not yet reaped, so its id names no one else's). Once the command
 /// ended by itself, what it left in the background stays, and its output
 /// is waited for at most [`DRAIN`].
-pub fn run(mut command: Command, timeout: Duration) -> Result<Ran, String> {
-    command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+pub fn run(command: Command, timeout: Duration) -> Result<Ran, String> {
+    run_with(command, timeout, None)
+}
+
+/// [`run`], `input` written to its stdin (then closed) when given; stdin
+/// empty otherwise.
+pub fn run_with(mut command: Command, timeout: Duration, input: Option<&[u8]>) -> Result<Ran, String> {
+    let stdin = if input.is_some() { Stdio::piped() } else { Stdio::null() };
+    command.stdin(stdin).stdout(Stdio::piped()).stderr(Stdio::piped());
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
         command.process_group(0);
     }
     let mut child = command.spawn().map_err(|error| format!("cannot start it: {error}"))?;
+    // Written while its output is read, so that neither waits on a full pipe.
+    if let (Some(mut pipe), Some(input)) = (child.stdin.take(), input) {
+        let input = input.to_vec();
+        std::thread::spawn(move || {
+            use std::io::Write;
+            let _ = pipe.write_all(&input);
+        });
+    }
     let stdout = catch(child.stdout.take());
     let stderr = catch(child.stderr.take());
     let deadline = Instant::now() + timeout;
@@ -178,10 +195,13 @@ pub struct Asked {
     /// Folders put first on its `PATH` (an environment's, a toolchain's).
     pub path_first: Vec<PathBuf>,
     pub timeout: Duration,
+    /// Variables added to its environment, and the text on its stdin.
+    pub env: Vec<(String, String)>,
+    pub stdin: Option<String>,
 }
 
 /// `code.exec`'s params, checked: `{dir, command, path_first?: [dir],
-/// timeout_secs?}`.
+/// timeout_secs?, env?: {name: value}, stdin?}`.
 pub fn asked(params: &JsonMap) -> RunnerResult<Asked> {
     let dir = crate::params::host_path(crate::params::text(params, "dir")?)?;
     if !dir.is_dir() {
@@ -196,7 +216,27 @@ pub fn asked(params: &JsonMap) -> RunnerResult<Asked> {
         .map(|folder| crate::params::host_path(folder))
         .collect::<RunnerResult<_>>()?;
     let timeout = crate::params::timeout_secs(params, TIMEOUT, MAX_TIMEOUT)?;
-    Ok(Asked { dir, command: command.to_string(), path_first, timeout })
+    let mut env = Vec::new();
+    match params.get("env") {
+        None | Some(Value::Null) => {}
+        Some(Value::Object(fields)) => {
+            for (name, value) in fields {
+                let value =
+                    value.as_str().ok_or_else(|| RunnerError::new(INVALID_PARAMS, format!("env {name} is text")))?;
+                if name.is_empty() || name.contains(['=', '\0']) || value.contains('\0') {
+                    return Err(RunnerError::new(INVALID_PARAMS, format!("env {name:?} is no variable")));
+                }
+                env.push((name.clone(), value.to_string()));
+            }
+        }
+        Some(_) => return Err(RunnerError::new(INVALID_PARAMS, "env is an object of text")),
+    }
+    let stdin = match params.get("stdin") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(text)) => Some(text.clone()),
+        Some(_) => return Err(RunnerError::new(INVALID_PARAMS, "stdin is text")),
+    };
+    Ok(Asked { dir, command: command.to_string(), path_first, timeout, env, stdin })
 }
 
 /// `code.exec`: run what was asked; how it went.
@@ -210,7 +250,10 @@ pub fn op(params: &JsonMap) -> RunnerResult<Value> {
             .map_err(|error| RunnerError::new(INVALID_PARAMS, format!("path_first: {error}")))?;
         command.env("PATH", path);
     }
-    run(command, asked.timeout).map(|ran| ran.to_json()).map_err(|why| RunnerError::new(EXEC_FAILED, why))
+    command.envs(asked.env.iter().map(|(name, value)| (name, value)));
+    run_with(command, asked.timeout, asked.stdin.as_deref().map(str::as_bytes))
+        .map(|ran| ran.to_json())
+        .map_err(|why| RunnerError::new(EXEC_FAILED, why))
 }
 
 #[cfg(test)]
@@ -222,6 +265,25 @@ mod tests {
     /// `code.exec`'s params from JSON.
     fn params(value: Value) -> JsonMap {
         value.as_object().cloned().unwrap()
+    }
+
+    /// A variable given is the command's alone, never on its command line;
+    /// the text given is its stdin, to its end (homology#25).
+    #[test]
+    #[cfg(unix)]
+    fn variables_and_stdin_reach_the_command_and_not_its_line() {
+        let folder = tempfile::tempdir().unwrap();
+        let dir = folder.path().to_string_lossy();
+        let asked = json!({"dir": dir, "command": "printf '%s|' \"$SECRET\"; cat; echo '|end'", "env": {"SECRET": "p@ss w'rd"}, "stdin": "select 1;\nselect 2;\n"});
+        let answer = op(&params(asked.clone())).unwrap();
+        assert_eq!(answer["stdout"], "p@ss w'rd|select 1;\nselect 2;\n|end\n");
+        assert!(!asked["command"].as_str().unwrap().contains("p@ss"), "the line never holds it");
+        for wrong in [json!({"": "x"}), json!({"A=B": "x"}), json!({"A": 1}), json!("A=1")] {
+            let refused = op(&params(json!({"dir": dir, "command": "true", "env": wrong}))).unwrap_err();
+            assert_eq!(refused.code, INVALID_PARAMS, "{wrong}");
+        }
+        // Without stdin: empty, at once.
+        assert_eq!(op(&params(json!({"dir": dir, "command": "cat; echo done"}))).unwrap()["stdout"], "done\n");
     }
 
     #[test]
