@@ -29,6 +29,7 @@ mod context;
 pub mod host_key;
 pub mod keys;
 mod logins;
+pub mod sandbox;
 pub mod servers;
 pub mod ssh;
 mod target;
@@ -98,4 +99,5 @@ pub const CODES: &[&str] = &[
     "server_store_read_failed",
     "server_store_write_failed",
     "unsupported_server_schema",
+    "sandbox_ssh_failed",
 ];

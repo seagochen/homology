@@ -42,10 +42,55 @@ const LONGEST_NAME: usize = 120;
 
 /// The folder the programs share: [`HOME_VARIABLE`] when it is an absolute
 /// path, else `homology` in the user's configuration folder; none without
-/// either.
+/// either. A program in an App Group asks [`shared_dir_in`] instead.
 pub fn shared_dir() -> Option<PathBuf> {
-    let named = std::env::var_os(HOME_VARIABLE).map(PathBuf::from).filter(|path| path.is_absolute());
-    named.or_else(|| sys::config_home().map(|folder| folder.join("homology")))
+    shared_dir_in(None)
+}
+
+/// [`shared_dir`] for a program in the macOS App Group `group` (#19,
+/// `<team id>.<name>`, declared in its `com.apple.security.application-groups`
+/// entitlement, every program of the group signed by that team): `homology`
+/// in the group's container, which sandboxed programs and others share,
+/// when it can be made and written; else as [`shared_dir`]. Elsewhere than
+/// macOS the group is not asked about. [`HOME_VARIABLE`] still comes first.
+pub fn shared_dir_in(group: Option<&str>) -> Option<PathBuf> {
+    // Made, and its list's lock taken: written there, then.
+    let usable = |folder: &Path| std::fs::create_dir_all(folder).is_ok() && sys::LockFile::take(&file(folder)).is_ok();
+    shared_dir_with(group.filter(|_| cfg!(target_os = "macos")), &|name| std::env::var_os(name), &usable)
+}
+
+/// [`shared_dir_in`] with the environment read through `variable`, and
+/// whether a folder can be used told by `usable`.
+fn shared_dir_with(
+    group: Option<&str>,
+    variable: &dyn Fn(&str) -> Option<std::ffi::OsString>,
+    usable: &dyn Fn(&Path) -> bool,
+) -> Option<PathBuf> {
+    if let Some(named) = variable(HOME_VARIABLE).map(PathBuf::from).filter(|path| path.is_absolute()) {
+        return Some(named);
+    }
+    let grouped = group.and_then(|group| group_container(group, variable)).map(|folder| folder.join("homology"));
+    if let Some(grouped) = grouped.filter(|folder| usable(folder)) {
+        return Some(grouped);
+    }
+    sys::config_home().map(|folder| folder.join("homology"))
+}
+
+/// The container of the App Group `group` (a name with no `/`): in the
+/// user's own `Library/Group Containers`. A sandboxed program's `HOME` is
+/// its own container (`~/Library/Containers/<id>/Data`), so the user's
+/// home is what comes before that.
+fn group_container(group: &str, variable: &dyn Fn(&str) -> Option<std::ffi::OsString>) -> Option<PathBuf> {
+    if group.is_empty() || group.contains(['/', '\\']) || group.starts_with('.') {
+        return None;
+    }
+    let home = variable("HOME").map(PathBuf::from).filter(|path| path.is_absolute())?;
+    let text = home.to_string_lossy().into_owned();
+    let user = match text.find("/Library/Containers/") {
+        Some(at) => PathBuf::from(&text[..at]),
+        None => home,
+    };
+    Some(user.join("Library").join("Group Containers").join(group))
 }
 
 /// The saved servers' file in the shared folder `shared`.
@@ -328,6 +373,36 @@ pub fn import(path: &Path, servers: Vec<Server>) -> SshResult<usize> {
     })
 }
 
+/// What moving a program's earlier shared folder into another did: the
+/// servers added, the login keys moved, the known hosts added.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Moved {
+    pub servers: usize,
+    pub keys: crate::keys::Adopted,
+    pub known_hosts: usize,
+}
+
+/// Move what the shared folder `from` holds into `to` (#19: a sandboxed
+/// program's own folder, from before its App Group's): its servers, ids
+/// and tombstones kept, those `to` has already left out; its login keys
+/// ([`crate::keys::adopt`]: `cx`'s keys folder is `to`'s); the hosts its
+/// sandbox known hosts name that `to`'s lack. `from` is left as it was, so
+/// moving again changes nothing.
+pub fn adopt(cx: &crate::Context, from: &Path, to: &Path) -> SshResult<Moved> {
+    if from == to || !from.is_dir() {
+        return Ok(Moved::default());
+    }
+    let known: std::collections::HashSet<String> =
+        all(&file(to))?.into_iter().map(|server| server.connection.id).collect();
+    let new: Vec<Server> =
+        all(&file(from))?.into_iter().filter(|server| !known.contains(&server.connection.id)).collect();
+    let servers = if new.is_empty() { 0 } else { import(&file(to), new)? };
+    let keys = crate::keys::adopt(cx, &keys_dir(from))?;
+    let known_hosts =
+        crate::sandbox::adopt_known_hosts(&crate::sandbox::known_hosts(from), &crate::sandbox::known_hosts(to))?;
+    Ok(Moved { servers, keys, known_hosts })
+}
+
 /// Change the records of the file at `path` with `change`, holding its
 /// lock across programs and reading them under it, and write them, one
 /// revision up, when it succeeds.
@@ -537,6 +612,68 @@ mod tests {
         assert_eq!(list(&path).unwrap_err().code, "unsupported_server_schema");
         std::fs::write(&path, "not json").unwrap();
         assert_eq!(list(&path).unwrap_err().code, "server_store_read_failed");
+    }
+
+    /// A program in an App Group shares the group's container (#19), from
+    /// inside its sandbox too; one that cannot use it shares the usual
+    /// folder; `HOMOLOGY_HOME` comes first.
+    #[test]
+    fn a_program_in_an_app_group_shares_the_group_s_container() {
+        let group = "9D45973HBS.io.github.seagochen.homology";
+        let environment = |home: &'static str, named: Option<&'static str>| {
+            move |name: &str| match name {
+                "HOME" => Some(home.into()),
+                HOME_VARIABLE => named.map(Into::into),
+                _ => None,
+            }
+        };
+        let container = PathBuf::from(format!("/Users/me/Library/Group Containers/{group}/homology"));
+        let yes = |_: &Path| true;
+        let sandboxed = environment("/Users/me/Library/Containers/io.github.seagochen.annotarycat/Data", None);
+        assert_eq!(
+            shared_dir_with(Some(group), &sandboxed, &yes),
+            Some(container.clone()),
+            "the user's, not the app's"
+        );
+        assert_eq!(shared_dir_with(Some(group), &environment("/Users/me", None), &yes), Some(container));
+        let no = |_: &Path| false;
+        let usual = sys::config_home().map(|folder| folder.join("homology"));
+        assert_eq!(shared_dir_with(Some(group), &environment("/Users/me", None), &no), usual, "not usable: the usual");
+        assert_eq!(shared_dir_with(None, &environment("/Users/me", None), &yes), usual, "no group: the usual");
+        let named = environment("/Users/me", Some("/tmp/shared"));
+        assert_eq!(shared_dir_with(Some(group), &named, &yes), Some(PathBuf::from("/tmp/shared")));
+        for wrong in ["", "../x", "a/b", ".hidden"] {
+            assert_eq!(group_container(wrong, &environment("/Users/me", None)), None, "{wrong:?}");
+        }
+    }
+
+    /// A program's earlier folder moves into its App Group's once: servers
+    /// the group's lacks, the login keys, the known hosts (#19).
+    #[test]
+    fn an_earlier_shared_folder_moves_into_the_group_s_once() {
+        let folder = tempfile::tempdir().unwrap();
+        let (from, to) = (folder.path().join("own"), folder.path().join("group"));
+        let mine = save(&file(&from), input("Mine", "gpu", ""), "pc").unwrap();
+        save(&file(&to), input("Theirs", "lab", ""), "pc").unwrap();
+        let hosts = crate::sandbox::known_hosts(&from);
+        std::fs::create_dir_all(hosts.parent().unwrap()).unwrap();
+        std::fs::write(&hosts, "gpu ssh-ed25519 AAAA1\n").unwrap();
+        let cx = crate::Context::new(crate::App { name: "tool", env: "TOOL" });
+        cx.set_keys_dir(keys_dir(&to));
+        let moved = adopt(&cx, &from, &to).unwrap();
+        assert_eq!((moved.servers, moved.known_hosts), (1, 1));
+        let names: Vec<String> = list(&file(&to)).unwrap().into_iter().map(|server| server.connection.name).collect();
+        assert_eq!(names, ["Theirs", "Mine"]);
+        assert_eq!(
+            find(&file(&to), &mine.connection.id, false).unwrap().connection.revision,
+            1,
+            "its id and revision kept"
+        );
+        let before = std::fs::read_to_string(file(&to)).unwrap();
+        assert_eq!(adopt(&cx, &from, &to).unwrap(), Moved::default(), "moved again: nothing");
+        assert_eq!(std::fs::read_to_string(file(&to)).unwrap(), before, "not even written");
+        assert!(file(&from).is_file(), "the earlier folder stays");
+        assert_eq!(adopt(&cx, &to, &to).unwrap(), Moved::default());
     }
 
     #[test]
