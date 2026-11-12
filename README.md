@@ -11,7 +11,7 @@ steps are in [#1](https://github.com/seagochen/homology/issues/1).
 ## Crates
 
 ```
-homology-sys      lib         the system helpers the others share (the standard library alone)
+homology-sys      lib         the system helpers the others share (the standard library, and fs4 for file locks)
 homology-runner   lib + bin   the protocol (JSON lines, a hello handshake, stable error codes)
                               the server: the operations every runner has, and those a program adds (server::Runner)
                               the client: over the pipes of any child process (this computer, or ssh … serve)
@@ -23,8 +23,9 @@ homology-runner   lib + bin   the protocol (JSON lines, a hello handshake, stabl
                               code.exec: a command run in a folder, exit code and output back, its process
                               group ended past its time limit
 homology-ssh      lib         the system ssh in batch mode: targets, scripts and sessions, stable error codes,
-                              host keys the user confirms, a password used once through askpass,
-                              login keys for hosts that take only a password
+                              host keys the user confirms (and replaces once compared), a password used once
+                              through askpass, login keys for hosts that take only a password, the saved
+                              servers the programs share, folders on a host listed to choose one
 homology          lib         the caller's side: a program's runners carried for SSH hosts, placed on a
                               host by their hash and talked to over ssh … serve, one session per host
                               console: a shell or an interactive Python on this computer or a host,
@@ -111,6 +112,33 @@ One JSON object per line, UTF-8, over the runner's stdin and stdout:
 
 The first request is `hello {protocol, version}`; the answer is
 `{protocol, name, version, ops}`.
+
+## Shared servers, and store builds
+
+The programs built on Homology share the servers saved in one of them and
+the login keys set up for them (`homology_ssh::servers`, #17): one list in
+one folder, changed under a lock across programs, each change made on the
+revision its user saw (409 `server_changed` otherwise, #18).
+
+| Where | The shared folder |
+|---|---|
+| Linux | `~/.config/homology/` (`$XDG_CONFIG_HOME`) |
+| Windows, an installer or MSIX | `%APPDATA%\homology\`: an MSIX package turns file-write virtualization off (`FileSystemWriteVirtualization` `disabled`, the `unvirtualizedResources` capability), or each package writes its own copy |
+| macOS, a program in the App Group (#19) | `~/Library/Group Containers/<team id>.io.github.seagochen.homology/homology/`, for `servers::shared_dir_in(Some(group))` |
+| macOS otherwise | `~/Library/Application Support/homology/` (a sandboxed program's own container) |
+| `HOMOLOGY_HOME` set | that folder (tests, portable setups) |
+
+A macOS program in the group declares it in its
+`com.apple.security.application-groups` entitlement as
+`<team id>.io.github.seagochen.homology` and is signed by that team: the
+group needs no registration and no provisioning profile; launched by the
+system, a program signed by another team (or ad hoc) is refused the
+group's container and keeps to its own folder. A sandboxed program cannot
+read `~/.ssh`: it runs `ssh` with `sandbox::ssh_config(shared)`, its own
+known hosts in the shared folder, and moves what it kept before into the
+group's folder once with `servers::adopt`. Helpers it ships (its askpass
+program) are signed with the sandbox's `inherit` entitlement; the runners it
+places on hosts ship inside it, never downloaded. More in #21.
 
 ## Use
 

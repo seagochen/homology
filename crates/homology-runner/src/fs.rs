@@ -5,6 +5,9 @@
 //!   folders in [`SKIPPED`] left out, [`MAX_FILES`] at most.
 //! - `fs.read {root, path}`: `{path, text, sha256, size}`; a file that is
 //!   not UTF-8 text, or larger than [`MAX_TEXT`], is refused.
+//! - `fs.read_bytes {root, path}`: `{path, base64, sha256, size}`, any
+//!   file's bytes (an image to show); one larger than [`MAX_BYTES`] is
+//!   refused.
 //! - `fs.write {root, path, text, sha256}`: saved only when the file's
 //!   content is still the one whose sha256 is given (`null`: the file must
 //!   not exist yet), else [`CODE_CONFLICT`] and nothing written. The text
@@ -38,6 +41,10 @@ pub const SKIPPED: &[&str] = &[".git", ".venv", "__pycache__", "node_modules", "
 
 /// The largest file the editor opens.
 pub const MAX_TEXT: u64 = 2 * 1024 * 1024;
+
+/// The largest file `fs.read_bytes` gives: base64, it still fits in a
+/// protocol line ([`crate::protocol::MAX_LINE`]).
+pub const MAX_BYTES: u64 = 32 * 1024 * 1024;
 
 /// Matches a search gives at most, and how much of a matching line it
 /// gives back (in chars).
@@ -245,8 +252,9 @@ pub fn delete(root: &Path, path: &str) -> RunnerResult<Value> {
     Ok(json!({"path": path, "deleted": true}))
 }
 
-/// `fs.read`.
-pub fn read(root: &Path, path: &str) -> RunnerResult<Value> {
+/// The bytes of the file at `path` in `root`, of up to `largest` bytes:
+/// what `fs.read` and `fs.read_bytes` read.
+fn file_bytes(root: &Path, path: &str, largest: u64) -> RunnerResult<Vec<u8>> {
     let full = inside(root, path)?;
     if full.is_dir() {
         return Err(RunnerError::new(CODE_NOT_FOUND, format!("{path} is a folder")));
@@ -258,19 +266,31 @@ pub fn read(root: &Path, path: &str) -> RunnerResult<Value> {
         }
         Err(error) => return Err(io("cannot read", &full, error)),
     };
-    if size > MAX_TEXT {
+    if size > largest {
         return Err(RunnerError::new(
             CODE_TOO_LARGE,
-            format!("{path} is {size} bytes; the editor opens files of up to {MAX_TEXT}"),
+            format!("{path} is {size} bytes; the editor opens files of up to {largest}"),
         ));
     }
-    let bytes =
-        current(&full)?.ok_or_else(|| RunnerError::new(CODE_NOT_FOUND, format!("{path} is not in the directory")))?;
+    current(&full)?.ok_or_else(|| RunnerError::new(CODE_NOT_FOUND, format!("{path} is not in the directory")))
+}
+
+/// `fs.read`.
+pub fn read(root: &Path, path: &str) -> RunnerResult<Value> {
+    let bytes = file_bytes(root, path, MAX_TEXT)?;
     let hash = sha256(&bytes);
     let size = bytes.len();
     let text =
         String::from_utf8(bytes).map_err(|_| RunnerError::new(CODE_BINARY, format!("{path} is not text (UTF-8)")))?;
     Ok(json!({"path": path, "text": text, "sha256": hash, "size": size}))
+}
+
+/// `fs.read_bytes`.
+pub fn read_bytes(root: &Path, path: &str) -> RunnerResult<Value> {
+    use base64::Engine;
+    let bytes = file_bytes(root, path, MAX_BYTES)?;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    Ok(json!({"path": path, "base64": encoded, "sha256": sha256(&bytes), "size": bytes.len()}))
 }
 
 /// `fs.write`: `expected` is the sha256 the editor opened, `None` for a
@@ -400,6 +420,7 @@ pub fn op(op: &str, params: &JsonMap) -> RunnerResult<Value> {
     match op {
         "fs.list" => list(&root),
         "fs.read" => read(&root, text("path")?),
+        "fs.read_bytes" => read_bytes(&root, text("path")?),
         "fs.write" => {
             let expected = match params.get("sha256") {
                 None | Some(Value::Null) => None,
@@ -590,5 +611,30 @@ mod tests {
             INVALID_PARAMS
         );
         assert_eq!(op("fs.stat", &params(json!({"root": root}))).unwrap_err().code, UNKNOWN_OP);
+    }
+
+    /// Any file's bytes (crescent#59): a file that is not text comes back
+    /// whole in base64 with its sha256; folders, missing and too large
+    /// files, and paths out of the root are refused as `fs.read` refuses them.
+    #[test]
+    fn any_file_s_bytes_are_read() {
+        use base64::Engine;
+        let dir = folder();
+        let bytes = [0x89, b'P', b'N', b'G', 0, 0xff, 0xfe];
+        std::fs::write(dir.path().join("image.png"), bytes).unwrap();
+        assert_eq!(read(dir.path(), "image.png").unwrap_err().code, CODE_BINARY);
+        let root = dir.path().to_string_lossy().to_string();
+        let read =
+            op("fs.read_bytes", &json!({"root": root, "path": "image.png"}).as_object().unwrap().clone()).unwrap();
+        let decoded = base64::engine::general_purpose::STANDARD.decode(read["base64"].as_str().unwrap()).unwrap();
+        assert_eq!(decoded, bytes);
+        assert_eq!(read["size"], bytes.len());
+        assert_eq!(read["sha256"], sha256(&bytes));
+        assert_eq!(read_bytes(dir.path(), "src").unwrap_err().code, CODE_NOT_FOUND);
+        assert_eq!(read_bytes(dir.path(), "none.png").unwrap_err().code, CODE_NOT_FOUND);
+        assert_eq!(read_bytes(dir.path(), "../image.png").unwrap_err().code, CODE_PATH_INVALID);
+        let large = std::fs::File::create(dir.path().join("large.bin")).unwrap();
+        large.set_len(MAX_BYTES + 1).unwrap();
+        assert_eq!(read_bytes(dir.path(), "large.bin").unwrap_err().code, CODE_TOO_LARGE);
     }
 }

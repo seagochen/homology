@@ -10,7 +10,9 @@
 //! appended to the real file, so the key the user confirmed is the key
 //! recorded. Trusting scans again and refuses when the fingerprint differs
 //! from the one confirmed, and never adds a key for a host the known hosts
-//! already name: a changed key is the user's to remove, in a terminal.
+//! already name. A changed key (the host set up again) is replaced only by
+//! [`replace`], once the user compared the new fingerprint: the earlier
+//! keys are removed and the new one recorded, or nothing changes.
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -108,48 +110,136 @@ impl HostKeyReport {
 
 /// Compare the key `target` presents with the user's known hosts.
 pub fn check(cx: &Context, target: &SshTarget) -> SshResult<HostKeyReport> {
-    Ok(inspect(cx, target)?.0)
+    Ok(inspect(cx, target)?.report)
 }
 
 /// Record the key `target` presents in the user's known hosts, provided its
 /// fingerprint is `fingerprint` (the one the user was shown) and the known
 /// hosts do not name the host yet. Returns the report after writing.
 pub fn trust(cx: &Context, target: &SshTarget, fingerprint: &str) -> SshResult<HostKeyReport> {
-    let (report, lines) = inspect(cx, target)?;
+    let Inspected { report, lines, .. } = inspect(cx, target)?;
     match report.status {
         HostKeyStatus::Known => return Ok(report),
-        HostKeyStatus::Changed => {
-            return Err(SshError::new(
-                "ssh_host_key",
-                format!(
-                    "the known hosts already hold another key for {}; if the change is expected, remove it with `{}`",
-                    report.name,
-                    report.remove_command()
-                ),
-            ))
-        }
+        HostKeyStatus::Changed => return Err(changed(&report)),
         HostKeyStatus::Unknown => {}
     }
-    if report.presented.fingerprint != fingerprint {
-        return Err(SshError::new(
-            "ssh_host_key_mismatch",
-            format!(
-                "{} now presents {}, not the key that was confirmed; check the new fingerprint",
-                report.name, report.presented.fingerprint
-            ),
-        ));
+    confirmed(&report, fingerprint)?;
+    recorded(cx, report, &lines)
+}
+
+/// `ssh_host_key`: the known hosts hold another key for `report`'s host.
+fn changed(report: &HostKeyReport) -> SshError {
+    SshError::new(
+        "ssh_host_key",
+        format!(
+            "the known hosts already hold another key for {}; if the change is expected, remove it with `{}`",
+            report.name,
+            report.remove_command()
+        ),
+    )
+}
+
+/// `lines`, the key `report`'s host presents, recorded in its known hosts
+/// under their lock, looked at again under it (#18): when another program
+/// recorded the host meanwhile, the same key is not recorded twice and
+/// another is the change it is (`ssh_host_key`).
+fn recorded(cx: &Context, report: HostKeyReport, lines: &[String]) -> SshResult<HostKeyReport> {
+    let _lock = known_hosts_lock(&report.known_hosts)?;
+    let now = match report.known_hosts.is_file() {
+        true => lookup(cx, &report.known_hosts, &report.name)?,
+        false => Vec::new(),
+    };
+    if now.is_empty() {
+        append_lines(&report.known_hosts, lines)?;
+    } else if !now.iter().any(|key| key.fingerprint == report.presented.fingerprint) {
+        return Err(changed(&report));
     }
-    append_lines(&report.known_hosts, &lines)?;
     Ok(HostKeyReport { status: HostKeyStatus::Known, recorded: vec![report.presented.clone()], ..report })
 }
 
-/// The report, and the known-hosts lines `ssh` wrote for the presented key.
-fn inspect(cx: &Context, target: &SshTarget) -> SshResult<(HostKeyReport, Vec<String>)> {
+/// The lock of the known-hosts file `file`, which other programs (and
+/// this one's other threads) write too; its folder made private first
+/// when it is not there.
+fn known_hosts_lock(file: &Path) -> SshResult<sys::LockFile> {
+    let failed =
+        |error: std::io::Error| SshError::new("known_hosts_write_failed", format!("{}: {error}", file.display()));
+    if let Some(parent) = file.parent().filter(|parent| !parent.as_os_str().is_empty() && !parent.exists()) {
+        sys::private_dir(parent).map_err(failed)?;
+    }
+    sys::LockFile::take(file).map_err(failed)
+}
+
+/// Replace the keys the known hosts hold for `target`, whose key changed
+/// (the host was set up again), by the key it presents now, provided its
+/// fingerprint is `fingerprint`, the one the user compared (#17). Nothing
+/// is changed for another key. Returns the report after writing.
+pub fn replace(cx: &Context, target: &SshTarget, fingerprint: &str) -> SshResult<HostKeyReport> {
+    let Inspected { report, lines, files } = inspect(cx, target)?;
+    confirmed(&report, fingerprint)?;
+    if report.status == HostKeyStatus::Known {
+        return Ok(report);
+    }
+    replaced(cx, &report, &lines, &files)
+}
+
+/// `ssh_host_key_mismatch` unless the key presented is the one the user
+/// was shown, `fingerprint`.
+fn confirmed(report: &HostKeyReport, fingerprint: &str) -> SshResult<()> {
+    if report.presented.fingerprint == fingerprint {
+        return Ok(());
+    }
+    Err(SshError::new(
+        "ssh_host_key_mismatch",
+        format!(
+            "{} now presents {}, not the key that was confirmed; check the new fingerprint",
+            report.name, report.presented.fingerprint
+        ),
+    ))
+}
+
+/// The keys of `report`'s host removed from each of `files` (with
+/// `ssh-keygen -R`, which knows hashed names), then `lines`, the presented
+/// key, recorded in its known hosts; under that file's lock, so that two
+/// programs replacing it at once leave it one record (#18).
+fn replaced(cx: &Context, report: &HostKeyReport, lines: &[String], files: &[PathBuf]) -> SshResult<HostKeyReport> {
+    let _lock = known_hosts_lock(&report.known_hosts)?;
+    let program = keygen_program(cx);
+    for file in files {
+        let output = sys::command(&program)
+            .arg("-R")
+            .arg(&report.name)
+            .arg("-f")
+            .arg(file)
+            .output()
+            .map_err(|error| not_started(&program, None, &error))?;
+        if !output.status.success() {
+            let said = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            return Err(SshError::new("known_hosts_write_failed", format!("{}: {said}", file.display())));
+        }
+    }
+    append_lines(&report.known_hosts, lines)?;
+    Ok(HostKeyReport { status: HostKeyStatus::Known, recorded: vec![report.presented.clone()], ..report.clone() })
+}
+
+/// What [`inspect`] found: the report, the known-hosts lines `ssh` wrote
+/// for the presented key, and the known-hosts files that name the host.
+struct Inspected {
+    report: HostKeyReport,
+    lines: Vec<String>,
+    files: Vec<PathBuf>,
+}
+
+/// The report of `target`'s key against the user's known hosts.
+fn inspect(cx: &Context, target: &SshTarget) -> SshResult<Inspected> {
     let config = Config::parse(&output_text(ssh_command(cx, target, &["-G"]), &ssh_program(cx))?)?;
     let name = config.name();
-    let mut recorded = Vec::new();
+    let (mut recorded, mut files) = (Vec::new(), Vec::new());
     for file in config.known_hosts.iter().filter(|file| file.is_file()) {
-        recorded.extend(lookup(cx, file, &name)?);
+        let found = lookup(cx, file, &name)?;
+        if !found.is_empty() {
+            files.push(file.clone());
+        }
+        recorded.extend(found);
     }
     // `ssh` prefers the types it already knows for the host; so does the
     // scan, or a host with an RSA key on record would seem changed when it
@@ -188,7 +278,7 @@ fn inspect(cx: &Context, target: &SshTarget) -> SshResult<(HostKeyReport, Vec<St
         known_hosts,
         shared_with_terminal,
     };
-    Ok((report, scanned.lines))
+    Ok(Inspected { report, lines: scanned.lines, files })
 }
 
 /// Whether the terminal's `ssh` uses the known hosts `ssh` uses here. macOS
@@ -555,5 +645,99 @@ mod tests {
         assert!(terminal_shares(false, false));
         assert!(!terminal_shares(true, false), "<ENV>_SSH_CONFIG");
         assert!(!terminal_shares(false, true), "a macOS sandbox");
+    }
+
+    /// A changed key is replaced (#17): the host's earlier key goes from
+    /// every known-hosts file that names it and the presented one is
+    /// recorded; other hosts keep theirs, and a key other than the one
+    /// confirmed is refused.
+    #[test]
+    fn a_changed_key_is_replaced_by_the_confirmed_one_only() {
+        let cx = Context::new(crate::App { name: "tool", env: "TOOL" });
+        let folder = tempfile::tempdir().unwrap();
+        let generated = sys::command(keygen_program(&cx))
+            .args(["-q", "-t", "ed25519", "-N", "", "-f"])
+            .arg(folder.path().join("new"))
+            .status();
+        if !generated.is_ok_and(|status| status.success()) {
+            eprintln!("no ssh-keygen here: nothing to replace with");
+            return;
+        }
+        let public = std::fs::read_to_string(folder.path().join("new.pub")).unwrap();
+        let blob = public.split_whitespace().nth(1).unwrap().to_string();
+        let (known, second) = (folder.path().join("known_hosts"), folder.path().join("known_hosts2"));
+        std::fs::write(&known, format!("gpu.lan ssh-ed25519 {ED25519}\nother.lan ssh-ed25519 {ED25519}\n")).unwrap();
+        std::fs::write(&second, format!("gpu.lan ssh-ed25519 {ED25519}\n")).unwrap();
+        let line = format!("gpu.lan ssh-ed25519 {blob}");
+        let presented = key_of_line(&line).unwrap();
+        let report = HostKeyReport {
+            name: "gpu.lan".into(),
+            hostname: "gpu.lan".into(),
+            port: 22,
+            status: HostKeyStatus::Changed,
+            presented: presented.clone(),
+            recorded: vec![key_of_line(&format!("gpu.lan ssh-ed25519 {ED25519}")).unwrap()],
+            known_hosts: known.clone(),
+            shared_with_terminal: true,
+        };
+        assert_eq!(confirmed(&report, "SHA256:another").unwrap_err().code, "ssh_host_key_mismatch");
+        confirmed(&report, &presented.fingerprint).unwrap();
+
+        let after = replaced(&cx, &report, &[line], &[known.clone(), second.clone()]).unwrap();
+        assert_eq!((after.status, after.recorded.clone()), (HostKeyStatus::Known, vec![presented.clone()]));
+        assert_eq!(lookup(&cx, &known, "gpu.lan").unwrap(), [presented]);
+        assert!(lookup(&cx, &second, "gpu.lan").unwrap().is_empty());
+        assert_eq!(lookup(&cx, &known, "other.lan").unwrap().len(), 1, "another host keeps its key");
+
+        // Replaced at once by several: one record still.
+        let line = format!("gpu.lan ssh-ed25519 {blob}");
+        std::thread::scope(|scope| {
+            let replacing: Vec<_> = (0..4)
+                .map(|_| {
+                    scope.spawn(|| replaced(&cx, &report, std::slice::from_ref(&line), std::slice::from_ref(&known)))
+                })
+                .collect();
+            for one in replacing {
+                one.join().unwrap().unwrap();
+            }
+        });
+        assert_eq!(lookup(&cx, &known, "gpu.lan").unwrap().len(), 1);
+    }
+
+    /// Several confirming a new host at once record its key once, and one
+    /// that finds another key recorded meanwhile records nothing (#18).
+    #[test]
+    fn a_host_confirmed_at_once_is_recorded_once() {
+        let cx = Context::new(crate::App { name: "tool", env: "TOOL" });
+        if !sys::command(keygen_program(&cx)).arg("-?").output().is_ok() {
+            eprintln!("no ssh-keygen here");
+            return;
+        }
+        let folder = tempfile::tempdir().unwrap();
+        let known = folder.path().join("ssh").join("known_hosts");
+        let line = format!("new.lan ssh-ed25519 {ED25519}");
+        let presented = key_of_line(&line).unwrap();
+        let report = HostKeyReport {
+            name: "new.lan".into(),
+            hostname: "new.lan".into(),
+            port: 22,
+            status: HostKeyStatus::Unknown,
+            presented,
+            recorded: Vec::new(),
+            known_hosts: known.clone(),
+            shared_with_terminal: true,
+        };
+        std::thread::scope(|scope| {
+            let confirming: Vec<_> =
+                (0..6).map(|_| scope.spawn(|| recorded(&cx, report.clone(), std::slice::from_ref(&line)))).collect();
+            for one in confirming {
+                assert_eq!(one.join().unwrap().unwrap().status, HostKeyStatus::Known);
+            }
+        });
+        assert_eq!(std::fs::read_to_string(&known).unwrap(), format!("{line}\n"), "one record");
+        // Another key for it now: refused, nothing written.
+        std::fs::write(&known, "new.lan ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAAAgQC7\n").unwrap();
+        assert_eq!(recorded(&cx, report, &[line]).unwrap_err().code, "ssh_host_key");
+        assert!(!std::fs::read_to_string(&known).unwrap().contains("ed25519"));
     }
 }

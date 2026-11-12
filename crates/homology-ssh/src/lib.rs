@@ -8,11 +8,15 @@
 //!   (a runner's `serve`), with failures under stable codes.
 //! - [`host_key`]: a host `ssh` does not know yet is not accepted blindly:
 //!   the key it presents is shown so the user can compare the fingerprint,
-//!   and recorded in their known hosts only once they confirm.
+//!   and recorded in their known hosts only once they confirm; a key that
+//!   changed is replaced the same way, never silently.
 //! - [`askpass`], [`keys`]: a host that takes only a password is the one
 //!   exception to "never sees a password": the user types it once, askpass
 //!   hands it to `ssh` for one run, and a login key of the program's own is
 //!   installed with it; the password is then dropped and never stored.
+//!
+//! - [`servers`]: the servers the user saved, shared by every program on
+//!   Homology with the login keys set up for them.
 //!
 //! What a session sets (the SSH configuration a sandboxed program uses,
 //! where its login keys live) is in a [`Context`] the caller owns and
@@ -20,10 +24,13 @@
 //! is process-wide.
 
 pub mod askpass;
+pub mod browse;
 mod context;
 pub mod host_key;
 pub mod keys;
 mod logins;
+pub mod sandbox;
+pub mod servers;
 pub mod ssh;
 mod target;
 
@@ -82,4 +89,15 @@ pub const CODES: &[&str] = &[
     "ssh_keys_unavailable",
     "ssh_keys_failed",
     "remote_failed",
+    "remote_directory_missing",
+    "remote_directory_denied",
+    "invalid_server",
+    "server_not_found",
+    "server_name_exists",
+    "server_changed",
+    "server_ambiguous",
+    "server_store_read_failed",
+    "server_store_write_failed",
+    "unsupported_server_schema",
+    "sandbox_ssh_failed",
 ];
