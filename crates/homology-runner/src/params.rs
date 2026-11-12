@@ -86,11 +86,15 @@ mod tests {
         }
     }
 
+    /// `~`, `~/…` and `~\…` are the home folder ([`homology_sys::home_dir`])
+    /// for every operation, `files.*` too (homology#27).
     #[test]
     fn a_path_in_the_home_folder_is_expanded() {
-        let Ok(home) = std::env::var("HOME") else { return };
-        assert_eq!(host_path("~").unwrap(), PathBuf::from(&home));
-        assert_eq!(host_path("~/x").unwrap(), PathBuf::from(format!("{home}/x")));
+        let Some(home) = homology_sys::home_dir() else { return };
+        assert_eq!(host_path("~").unwrap(), home);
+        assert_eq!(host_path("~/x").unwrap(), home.join("x"));
+        assert_eq!(host_path("~\\x").unwrap(), home.join("x"));
+        assert_eq!(host_path("~/a/b").unwrap(), home.join("a/b"));
     }
 
     #[test]
