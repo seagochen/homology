@@ -21,9 +21,9 @@ use crate::JsonMap;
 
 /// The operations every runner answers, as `hello` lists them.
 pub const OPS: &[&str] = &[
-    "hello", "ping", "shutdown", "fs.list", "fs.read", "fs.write", "fs.mkdir", "fs.move", "fs.copy", "fs.delete",
-    "fs.search", "env.discover", "env.probe", "code.check", "toolchain.discover", "toolchain.probe", "code.exec",
-    "code.complete",
+    "hello", "ping", "shutdown", "fs.list", "fs.read", "fs.read_bytes", "fs.write", "fs.mkdir", "fs.move", "fs.copy",
+    "fs.delete", "fs.search", "env.discover", "env.probe", "code.check", "toolchain.discover", "toolchain.probe",
+    "code.exec", "code.complete",
 ];
 
 /// A runner as a program serves it: its name and version, as `hello` gives

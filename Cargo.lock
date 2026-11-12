@@ -199,6 +199,7 @@ dependencies = [
 name = "homology-runner"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "hex",
  "homology-sys",
  "proptest",
