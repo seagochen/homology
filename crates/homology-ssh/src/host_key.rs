@@ -120,21 +120,53 @@ pub fn trust(cx: &Context, target: &SshTarget, fingerprint: &str) -> SshResult<H
     let Inspected { report, lines, .. } = inspect(cx, target)?;
     match report.status {
         HostKeyStatus::Known => return Ok(report),
-        HostKeyStatus::Changed => {
-            return Err(SshError::new(
-                "ssh_host_key",
-                format!(
-                    "the known hosts already hold another key for {}; if the change is expected, remove it with `{}`",
-                    report.name,
-                    report.remove_command()
-                ),
-            ))
-        }
+        HostKeyStatus::Changed => return Err(changed(&report)),
         HostKeyStatus::Unknown => {}
     }
     confirmed(&report, fingerprint)?;
-    append_lines(&report.known_hosts, &lines)?;
+    recorded(cx, report, &lines)
+}
+
+/// `ssh_host_key`: the known hosts hold another key for `report`'s host.
+fn changed(report: &HostKeyReport) -> SshError {
+    SshError::new(
+        "ssh_host_key",
+        format!(
+            "the known hosts already hold another key for {}; if the change is expected, remove it with `{}`",
+            report.name,
+            report.remove_command()
+        ),
+    )
+}
+
+/// `lines`, the key `report`'s host presents, recorded in its known hosts
+/// under their lock, looked at again under it (#18): when another program
+/// recorded the host meanwhile, the same key is not recorded twice and
+/// another is the change it is (`ssh_host_key`).
+fn recorded(cx: &Context, report: HostKeyReport, lines: &[String]) -> SshResult<HostKeyReport> {
+    let _lock = known_hosts_lock(&report.known_hosts)?;
+    let now = match report.known_hosts.is_file() {
+        true => lookup(cx, &report.known_hosts, &report.name)?,
+        false => Vec::new(),
+    };
+    if now.is_empty() {
+        append_lines(&report.known_hosts, lines)?;
+    } else if !now.iter().any(|key| key.fingerprint == report.presented.fingerprint) {
+        return Err(changed(&report));
+    }
     Ok(HostKeyReport { status: HostKeyStatus::Known, recorded: vec![report.presented.clone()], ..report })
+}
+
+/// The lock of the known-hosts file `file`, which other programs (and
+/// this one's other threads) write too; its folder made private first
+/// when it is not there.
+fn known_hosts_lock(file: &Path) -> SshResult<sys::LockFile> {
+    let failed =
+        |error: std::io::Error| SshError::new("known_hosts_write_failed", format!("{}: {error}", file.display()));
+    if let Some(parent) = file.parent().filter(|parent| !parent.as_os_str().is_empty() && !parent.exists()) {
+        sys::private_dir(parent).map_err(failed)?;
+    }
+    sys::LockFile::take(file).map_err(failed)
 }
 
 /// Replace the keys the known hosts hold for `target`, whose key changed
@@ -167,8 +199,10 @@ fn confirmed(report: &HostKeyReport, fingerprint: &str) -> SshResult<()> {
 
 /// The keys of `report`'s host removed from each of `files` (with
 /// `ssh-keygen -R`, which knows hashed names), then `lines`, the presented
-/// key, recorded in its known hosts.
+/// key, recorded in its known hosts; under that file's lock, so that two
+/// programs replacing it at once leave it one record (#18).
 fn replaced(cx: &Context, report: &HostKeyReport, lines: &[String], files: &[PathBuf]) -> SshResult<HostKeyReport> {
+    let _lock = known_hosts_lock(&report.known_hosts)?;
     let program = keygen_program(cx);
     for file in files {
         let output = sys::command(&program)
@@ -654,5 +688,56 @@ mod tests {
         assert_eq!(lookup(&cx, &known, "gpu.lan").unwrap(), [presented]);
         assert!(lookup(&cx, &second, "gpu.lan").unwrap().is_empty());
         assert_eq!(lookup(&cx, &known, "other.lan").unwrap().len(), 1, "another host keeps its key");
+
+        // Replaced at once by several: one record still.
+        let line = format!("gpu.lan ssh-ed25519 {blob}");
+        std::thread::scope(|scope| {
+            let replacing: Vec<_> = (0..4)
+                .map(|_| {
+                    scope.spawn(|| replaced(&cx, &report, std::slice::from_ref(&line), std::slice::from_ref(&known)))
+                })
+                .collect();
+            for one in replacing {
+                one.join().unwrap().unwrap();
+            }
+        });
+        assert_eq!(lookup(&cx, &known, "gpu.lan").unwrap().len(), 1);
+    }
+
+    /// Several confirming a new host at once record its key once, and one
+    /// that finds another key recorded meanwhile records nothing (#18).
+    #[test]
+    fn a_host_confirmed_at_once_is_recorded_once() {
+        let cx = Context::new(crate::App { name: "tool", env: "TOOL" });
+        if !sys::command(keygen_program(&cx)).arg("-?").output().is_ok() {
+            eprintln!("no ssh-keygen here");
+            return;
+        }
+        let folder = tempfile::tempdir().unwrap();
+        let known = folder.path().join("ssh").join("known_hosts");
+        let line = format!("new.lan ssh-ed25519 {ED25519}");
+        let presented = key_of_line(&line).unwrap();
+        let report = HostKeyReport {
+            name: "new.lan".into(),
+            hostname: "new.lan".into(),
+            port: 22,
+            status: HostKeyStatus::Unknown,
+            presented,
+            recorded: Vec::new(),
+            known_hosts: known.clone(),
+            shared_with_terminal: true,
+        };
+        std::thread::scope(|scope| {
+            let confirming: Vec<_> =
+                (0..6).map(|_| scope.spawn(|| recorded(&cx, report.clone(), std::slice::from_ref(&line)))).collect();
+            for one in confirming {
+                assert_eq!(one.join().unwrap().unwrap().status, HostKeyStatus::Known);
+            }
+        });
+        assert_eq!(std::fs::read_to_string(&known).unwrap(), format!("{line}\n"), "one record");
+        // Another key for it now: refused, nothing written.
+        std::fs::write(&known, "new.lan ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAAAgQC7\n").unwrap();
+        assert_eq!(recorded(&cx, report, &[line]).unwrap_err().code, "ssh_host_key");
+        assert!(!std::fs::read_to_string(&known).unwrap().contains("ed25519"));
     }
 }

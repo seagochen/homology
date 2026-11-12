@@ -1,7 +1,8 @@
 //! The system helpers Homology's crates share, on the standard library
-//! alone: starting a program without a console window, writing a file so
-//! that it is never half-written, taking turns on a file within the
-//! process or across programs ([`LockFile`]), the user's home, cache and
+//! and the system's file locks (`fs4`): starting a program without a
+//! console window, writing a file so that it is never half-written, taking
+//! turns on a file within the process or across programs ([`LockFile`]),
+//! the user's home, cache and
 //! configuration folders, folders only the user can read, and Unix sockets
 //! a program's own processes talk over ([`local_socket`]).
 
@@ -11,8 +12,10 @@ use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{Arc, LazyLock, Mutex, PoisonError};
-use std::time::{Duration, Instant, SystemTime};
+use std::sync::{Arc, Condvar, LazyLock, Mutex, PoisonError};
+use std::time::{Duration, Instant};
+
+use fs4::fs_std::FileExt;
 
 #[cfg(unix)]
 pub mod local_socket;
@@ -111,25 +114,71 @@ fn config_home_with(variable: &dyn Fn(&str) -> Option<std::ffi::OsString>) -> Op
     Some(if cfg!(target_os = "macos") { home.join("Library/Application Support") } else { home.join(".config") })
 }
 
-/// How long [`LockFile::take`] waits for another holder, and how old a
-/// lock file is before it counts as left by a program that died.
+/// How long [`LockFile::take`] waits for another program that holds the
+/// lock.
 const LOCK_WAIT: Duration = Duration::from_secs(5);
-const LOCK_STALE: Duration = Duration::from_secs(10);
 
-/// A file's lock across programs: a `<name>.lock` file beside it, made
-/// only when none is there (the system's exclusive create), removed when
-/// this is dropped. Hold it around a read-change-write of a file other
-/// programs change too (a list they share). The exclusive create keeps
-/// the threads of one process apart as well.
-#[derive(Debug)]
+/// The turns of one file's [`LockFile`] in the process: tickets handed out
+/// as threads arrive (`next`), served in that order (`serving`).
+#[derive(Default)]
+struct Turns {
+    tickets: Mutex<(u64, u64)>,
+    served: Condvar,
+}
+
+/// The [`Turns`] of every lock taken so far, by its lock file.
+static TURNS: LazyLock<Mutex<HashMap<PathBuf, Arc<Turns>>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// A thread's turn at a [`LockFile`]: the next one's comes when it is dropped.
+struct Turn(Arc<Turns>);
+
+impl Turn {
+    /// Wait for the turn of the thread arriving now at `turns`.
+    fn wait(turns: Arc<Turns>) -> Self {
+        let mut tickets = turns.tickets.lock().unwrap_or_else(PoisonError::into_inner);
+        let ticket = tickets.0;
+        tickets.0 += 1;
+        while tickets.1 != ticket {
+            tickets = turns.served.wait(tickets).unwrap_or_else(PoisonError::into_inner);
+        }
+        drop(tickets);
+        Self(turns)
+    }
+}
+
+impl Drop for Turn {
+    fn drop(&mut self) {
+        let mut tickets = self.0.tickets.lock().unwrap_or_else(PoisonError::into_inner);
+        tickets.1 += 1;
+        self.0.served.notify_all();
+    }
+}
+
+/// A file's lock across programs and within the process (#18), held while
+/// this lives: hold it around a read-change-write of a file other programs
+/// change too (a list they share), so that each change is made on the
+/// latest file and none is lost.
+///
+/// Threads of the process queue for it in the order they arrive; programs
+/// take turns with the system's lock on `<name>.lock` beside the file
+/// (`flock` on Unix, `LockFileEx` on Windows), which the system lets go of
+/// when its program ends, dead or not: no lock is ever taken over from a
+/// holder that is merely slow. The `.lock` file stays.
 pub struct LockFile {
-    path: PathBuf,
+    file: File,
+    _turn: Turn,
+}
+
+impl std::fmt::Debug for LockFile {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("LockFile").field("file", &self.file).finish_non_exhaustive()
+    }
 }
 
 impl LockFile {
-    /// Take the lock of `path`, waiting for another program that holds it
-    /// (`TimedOut` after a few seconds); a lock file left by a program that
-    /// died is taken over once it is old.
+    /// Take the lock of `path`: after the threads of this process that
+    /// asked first, and waiting for another program that holds it
+    /// (`TimedOut` after a few seconds).
     pub fn take(path: &Path) -> io::Result<Self> {
         let mut name = path.file_name().unwrap_or_default().to_os_string();
         name.push(".lock");
@@ -137,36 +186,30 @@ impl LockFile {
         if let Some(parent) = lock.parent().filter(|parent| !parent.as_os_str().is_empty()) {
             fs::create_dir_all(parent)?;
         }
+        let turns = {
+            let mut all = TURNS.lock().unwrap_or_else(PoisonError::into_inner);
+            Arc::clone(all.entry(resolved(&lock)).or_default())
+        };
+        let turn = Turn::wait(turns);
+        let file = fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(&lock)?;
         let started = Instant::now();
-        loop {
-            match fs::OpenOptions::new().write(true).create_new(true).open(&lock) {
-                Ok(_) => return Ok(Self { path: lock }),
-                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                    let age = fs::metadata(&lock)
-                        .and_then(|metadata| metadata.modified())
-                        .ok()
-                        .and_then(|modified| SystemTime::now().duration_since(modified).ok());
-                    if age.is_some_and(|age| age > LOCK_STALE) {
-                        let _ = fs::remove_file(&lock);
-                        continue;
-                    }
-                    if started.elapsed() > LOCK_WAIT {
-                        return Err(io::Error::new(
-                            io::ErrorKind::TimedOut,
-                            format!("{} is held by another program", lock.display()),
-                        ));
-                    }
-                    std::thread::sleep(Duration::from_millis(20));
-                }
-                Err(error) => return Err(error),
+        while !FileExt::try_lock_exclusive(&file)? {
+            if started.elapsed() > LOCK_WAIT {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!("{} is held by another program", lock.display()),
+                ));
             }
+            std::thread::sleep(Duration::from_millis(20));
         }
+        Ok(Self { file, _turn: turn })
     }
 }
 
 impl Drop for LockFile {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
+        // Closing the file lets go too; this says so first, before the turn passes.
+        let _ = FileExt::unlock(&self.file);
     }
 }
 
@@ -279,31 +322,76 @@ mod tests {
         assert_eq!(config_home_with(&|_| None), None);
     }
 
+    /// The variable that makes this test program the other program holding
+    /// a lock: the file to lock.
+    const HOLDER: &str = "HOMOLOGY_TEST_LOCK_HOLDER";
+
+    /// Run as the other program ([`HOLDER`] set): hold the lock and say so
+    /// with `<file>.held`, until killed.
     #[test]
-    fn a_lock_file_is_held_once_and_a_dead_holder_s_is_taken_over() {
+    fn holder() {
+        let Some(path) = std::env::var_os(HOLDER).map(PathBuf::from) else { return };
+        let _held = LockFile::take(&path).unwrap();
+        fs::write(path.with_extension("held"), "").unwrap();
+        std::thread::sleep(Duration::from_secs(60));
+    }
+
+    /// The threads of a process take a lock in the order they asked (#18).
+    #[test]
+    fn threads_take_a_lock_in_turn() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("shared.json");
-        let lock = path.with_file_name("shared.json.lock");
-        {
-            let _held = LockFile::take(&path).unwrap();
-            assert!(lock.is_file());
-            // Another program holds it: one in this process waits its turn.
-            let waiter = {
-                let path = path.clone();
-                std::thread::spawn(move || LockFile::take(&path).map(|_| ()))
-            };
-            std::thread::sleep(Duration::from_millis(50));
-            assert!(!waiter.is_finished());
-            drop(_held);
-            waiter.join().unwrap().unwrap();
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let held = LockFile::take(&path).unwrap();
+        let waiting: Vec<_> = (0..6)
+            .map(|at| {
+                let (path, order) = (path.clone(), Arc::clone(&order));
+                let waiter = std::thread::spawn(move || {
+                    let _held = LockFile::take(&path).unwrap();
+                    order.lock().unwrap().push(at);
+                });
+                // Each asks after the one before.
+                std::thread::sleep(Duration::from_millis(30));
+                waiter
+            })
+            .collect();
+        assert!(order.lock().unwrap().is_empty(), "all wait while it is held");
+        drop(held);
+        for waiter in waiting {
+            waiter.join().unwrap();
         }
-        assert!(!lock.exists(), "dropped, it is gone");
-        // Left by a program that died long ago: taken over.
-        std::fs::write(&lock, "").unwrap();
-        let old = SystemTime::now() - LOCK_STALE - Duration::from_secs(1);
-        File::options().write(true).open(&lock).unwrap().set_modified(old).unwrap();
-        drop(LockFile::take(&path).unwrap());
-        assert!(!lock.exists());
+        assert_eq!(*order.lock().unwrap(), (0..6).collect::<Vec<_>>());
+    }
+
+    /// Another program's lock is waited for however slow it is, and is free
+    /// the moment that program dies (#18).
+    #[test]
+    fn another_program_s_lock_is_never_taken_over_and_frees_when_it_dies() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("shared.json");
+        let mut holder = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "tests::holder", "--nocapture", "--test-threads=1"])
+            .env(HOLDER, &path)
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap();
+        let started = Instant::now();
+        while !path.with_extension("held").exists() {
+            assert!(started.elapsed() < Duration::from_secs(30), "the holder never took the lock");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let waiter = {
+            let path = path.clone();
+            std::thread::spawn(move || LockFile::take(&path).map(|_| Instant::now()))
+        };
+        std::thread::sleep(Duration::from_millis(500));
+        assert!(!waiter.is_finished(), "a holder that is slow keeps it");
+        let killed = Instant::now();
+        holder.kill().unwrap();
+        holder.wait().unwrap();
+        let taken = waiter.join().unwrap().unwrap();
+        assert!(taken >= killed && taken - killed < Duration::from_secs(2), "free once it died");
+        assert!(path.with_file_name("shared.json.lock").is_file(), "the lock file stays");
     }
 
     #[test]

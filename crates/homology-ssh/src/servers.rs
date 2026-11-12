@@ -14,6 +14,12 @@
 //! changed under a [`LockFile`](homology_sys::LockFile) so that two programs
 //! saving at once both keep their change, and written whole or not at all.
 //! No password or key is ever in it.
+//!
+//! Each change is made once, on what its user saw (#18): a record has a
+//! `revision`, one up at each change, and a change names the revision it
+//! was made on; when the record changed since (in another program),
+//! `server_changed`, and nothing is written. The file has a revision too,
+//! one up at each write, for a program to tell the list changed.
 
 use std::path::{Path, PathBuf};
 
@@ -55,6 +61,8 @@ pub fn keys_dir(shared: &Path) -> PathBuf {
 
 /// A server as the user fills it in: no password or key, ever. `id` is
 /// empty for one not saved yet; `user` is empty to leave it to `ssh`.
+/// `revision` is the record's when it was read (0 for a new one), which a
+/// change is made on.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ServerInput {
     pub id: String,
@@ -62,6 +70,7 @@ pub struct ServerInput {
     pub host: String,
     pub user: String,
     pub port: u16,
+    pub revision: u64,
 }
 
 impl ServerInput {
@@ -113,7 +122,8 @@ pub struct Server {
 }
 
 /// The fields of a record [`Server`] knows.
-const KNOWN: &[&str] = &["id", "name", "host", "user", "port", "created_at", "updated_at", "origin", "deleted_at"];
+const KNOWN: &[&str] =
+    &["id", "name", "host", "user", "port", "revision", "created_at", "updated_at", "origin", "deleted_at"];
 
 impl Server {
     /// The record as the file holds it.
@@ -122,7 +132,7 @@ impl Server {
         let mut record = self.extra.clone();
         let known = json!({
             "id": input.id, "name": input.name, "host": input.host, "user": input.user, "port": input.port,
-            "created_at": self.created_at, "updated_at": self.updated_at, "origin": self.origin,
+            "revision": input.revision, "created_at": self.created_at, "updated_at": self.updated_at, "origin": self.origin,
             "deleted_at": self.deleted_at,
         });
         if let Value::Object(known) = known {
@@ -135,8 +145,9 @@ impl Server {
     pub fn from_json(value: &Value) -> Option<Self> {
         let text = |key: &str| value.get(key).and_then(Value::as_str).unwrap_or_default().to_string();
         let port = value.get("port").and_then(Value::as_u64).and_then(|port| u16::try_from(port).ok())?;
+        let revision = value.get("revision").and_then(Value::as_u64).unwrap_or_default();
         let connection =
-            ServerInput { id: text("id"), name: text("name"), host: text("host"), user: text("user"), port };
+            ServerInput { id: text("id"), name: text("name"), host: text("host"), user: text("user"), port, revision };
         if connection.id.is_empty() || connection.host.is_empty() {
             return None;
         }
@@ -162,9 +173,19 @@ impl Server {
 /// no file yet (`server_store_read_failed` when it cannot be read,
 /// `unsupported_server_schema` for a schema this does not know).
 pub fn all(path: &Path) -> SshResult<Vec<Server>> {
+    Ok(read(path)?.1)
+}
+
+/// The file's revision, one up at each write: 0 before the first.
+pub fn revision(path: &Path) -> SshResult<u64> {
+    Ok(read(path)?.0)
+}
+
+/// The file's revision and records.
+fn read(path: &Path) -> SshResult<(u64, Vec<Server>)> {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok((0, Vec::new())),
         Err(error) => return Err(SshError::new("server_store_read_failed", format!("{}: {error}", path.display()))),
     };
     let value: Value = serde_json::from_str(&text)
@@ -173,7 +194,8 @@ pub fn all(path: &Path) -> SshResult<Vec<Server>> {
         return Err(SshError::new("unsupported_server_schema", "unsupported server list schema"));
     }
     let records = value.get("servers").and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default();
-    Ok(records.iter().filter_map(Server::from_json).collect())
+    let revision = value.get("revision").and_then(Value::as_u64).unwrap_or_default();
+    Ok((revision, records.iter().filter_map(Server::from_json).collect()))
 }
 
 /// The saved servers, removed ones left out.
@@ -187,7 +209,22 @@ pub fn find(path: &Path, wanted: &str, by_name: bool) -> SshResult<Server> {
     Ok(found(&mut all(path)?, wanted, by_name)?.clone())
 }
 
-/// [`find`] among `servers`, to change it.
+/// [`find`] among `servers`, to change it as it was at `revision`:
+/// `server_changed` when it changed since, `server_not_found` when it is
+/// gone (removed meanwhile too).
+fn current<'a>(servers: &'a mut [Server], id: &str, revision: u64) -> SshResult<&'a mut Server> {
+    let server = found(servers, id, false)?;
+    if server.connection.revision != revision {
+        return Err(SshError::new(
+            "server_changed",
+            format!("{:?} was changed in another program since it was read; read it again", server.connection.name),
+        ));
+    }
+    server.connection.revision += 1;
+    Ok(server)
+}
+
+/// [`find`] among `servers`.
 fn found<'a>(servers: &'a mut [Server], wanted: &str, by_name: bool) -> SshResult<&'a mut Server> {
     servers
         .iter_mut()
@@ -228,7 +265,8 @@ pub fn normalized(mut input: ServerInput) -> SshResult<ServerInput> {
 }
 
 /// Save `input` (normalized), new when it has no id, saved on the computer
-/// `origin`; `server_name_exists` when another server has its name.
+/// `origin`; `server_name_exists` when another server has its name, and
+/// `server_changed` when it changed since `input` was read.
 pub fn save(path: &Path, input: ServerInput, origin: &str) -> SshResult<Server> {
     let mut input = normalized(input)?;
     changing(path, |servers| {
@@ -242,6 +280,7 @@ pub fn save(path: &Path, input: ServerInput, origin: &str) -> SshResult<Server> 
         let now = crate::keys::now();
         if input.id.is_empty() {
             input.id = uuid::Uuid::now_v7().to_string();
+            input.revision = 1;
             let server = Server {
                 connection: input.clone(),
                 created_at: now.clone(),
@@ -253,7 +292,8 @@ pub fn save(path: &Path, input: ServerInput, origin: &str) -> SshResult<Server> 
             servers.push(server.clone());
             return Ok(server);
         }
-        let server = found(servers, &input.id, false)?;
+        let server = current(servers, &input.id, input.revision)?;
+        input.revision = server.connection.revision;
         server.connection = input.clone();
         server.updated_at = now;
         server.origin = origin.to_string();
@@ -261,10 +301,11 @@ pub fn save(path: &Path, input: ServerInput, origin: &str) -> SshResult<Server> 
     })
 }
 
-/// Remove a saved server: a tombstone, `deleted_at` set.
-pub fn remove(path: &Path, id: &str) -> SshResult<()> {
+/// Remove the saved server `id` as it was at `revision`: a tombstone,
+/// `deleted_at` set; `server_changed` when it changed since.
+pub fn remove(path: &Path, id: &str, revision: u64) -> SshResult<()> {
     changing(path, |servers| {
-        let server = found(servers, id, false)?;
+        let server = current(servers, id, revision)?;
         let now = crate::keys::now();
         server.updated_at = now.clone();
         server.deleted_at = Some(now);
@@ -288,15 +329,17 @@ pub fn import(path: &Path, servers: Vec<Server>) -> SshResult<usize> {
 }
 
 /// Change the records of the file at `path` with `change`, holding its
-/// lock across programs, and write them when it succeeds.
+/// lock across programs and reading them under it, and write them, one
+/// revision up, when it succeeds.
 fn changing<T>(path: &Path, change: impl FnOnce(&mut Vec<Server>) -> SshResult<T>) -> SshResult<T> {
     let failed =
         |error: std::io::Error| SshError::new("server_store_write_failed", format!("{}: {error}", path.display()));
     let _lock = sys::LockFile::take(path).map_err(failed)?;
-    let mut servers = all(path)?;
+    let (revision, mut servers) = read(path)?;
     let answer = change(&mut servers)?;
     let records: Vec<Value> = servers.iter().map(Server::to_json).collect();
-    let text = serde_json::to_string_pretty(&json!({"schema_version": SCHEMA, "servers": records})).unwrap_or_default();
+    let file = json!({"schema_version": SCHEMA, "revision": revision + 1, "servers": records});
+    let text = serde_json::to_string_pretty(&file).unwrap_or_default();
     sys::atomic_write_bytes(path, (text + "\n").as_bytes()).map_err(failed)?;
     Ok(answer)
 }
@@ -307,7 +350,14 @@ mod tests {
 
     /// A server named `name` on `host`, port 22.
     fn input(name: &str, host: &str, user: &str) -> ServerInput {
-        ServerInput { id: String::new(), name: name.into(), host: host.into(), user: user.into(), port: 22 }
+        ServerInput {
+            id: String::new(),
+            name: name.into(),
+            host: host.into(),
+            user: user.into(),
+            port: 22,
+            revision: 0,
+        }
     }
 
     #[test]
@@ -327,13 +377,81 @@ mod tests {
         assert_eq!(changed.origin, "pc-2");
         assert_eq!(find(&path, "gpu", true).unwrap().connection.id, gpu.connection.id);
         assert_eq!(find(&path, "gpu", false).unwrap_err().code, "server_not_found", "by id only");
-        remove(&path, &gpu.connection.id).unwrap();
+        remove(&path, &gpu.connection.id, changed.connection.revision).unwrap();
         assert!(list(&path).unwrap().is_empty());
         let tombstones = all(&path).unwrap();
         assert!(tombstones.len() == 1 && tombstones[0].deleted_at.is_some());
-        assert_eq!(remove(&path, &gpu.connection.id).unwrap_err().code, "server_not_found");
+        let removed = remove(&path, &gpu.connection.id, tombstones[0].connection.revision);
+        assert_eq!(removed.unwrap_err().code, "server_not_found");
         // Its name is free again.
         save(&path, input("GPU", "new.lan", ""), "pc-1").unwrap();
+    }
+
+    /// A change is made on the revision its user saw, once: one made on an
+    /// older one (another program changed the server meanwhile) is refused
+    /// and writes nothing (#18).
+    #[test]
+    fn a_change_made_on_an_older_revision_is_refused() {
+        let folder = tempfile::tempdir().unwrap();
+        let path = file(folder.path());
+        assert_eq!(revision(&path).unwrap(), 0);
+        let gpu = save(&path, input("GPU", "gpu", ""), "pc").unwrap();
+        assert_eq!((gpu.connection.revision, revision(&path).unwrap()), (1, 1));
+        // Two programs read it; the first saves its change.
+        let (mut first, mut second) = (gpu.connection.clone(), gpu.connection.clone());
+        first.port = 2222;
+        let saved = save(&path, first, "pc-1").unwrap();
+        assert_eq!((saved.connection.revision, revision(&path).unwrap()), (2, 2));
+        // The second, on what it read before, is told and changes nothing.
+        let before = std::fs::read_to_string(&path).unwrap();
+        second.user = "me".into();
+        assert_eq!(save(&path, second, "pc-2").unwrap_err().code, "server_changed");
+        assert_eq!(remove(&path, &gpu.connection.id, 1).unwrap_err().code, "server_changed");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before, "nothing written");
+        // Read again, its change is made.
+        let mut again = find(&path, &gpu.connection.id, false).unwrap().connection;
+        again.user = "me".into();
+        let saved = save(&path, again, "pc-2").unwrap();
+        assert_eq!((saved.connection.port, saved.connection.user.as_str(), saved.connection.revision), (2222, "me", 3));
+        remove(&path, &gpu.connection.id, 3).unwrap();
+        assert_eq!((all(&path).unwrap()[0].connection.revision, revision(&path).unwrap()), (4, 4));
+    }
+
+    /// The variable that makes this test program another program saving
+    /// servers: the file, and the names to save, comma-separated.
+    const SAVER: &str = "HOMOLOGY_TEST_SERVER_SAVER";
+
+    /// Run as another program ([`SAVER`] set): save its servers.
+    #[test]
+    fn saver() {
+        let Some(task) = std::env::var(SAVER).ok() else { return };
+        let (path, names) = task.split_once('|').unwrap();
+        for name in names.split(',') {
+            save(Path::new(path), input(name, "h", ""), "pc").unwrap();
+        }
+    }
+
+    /// Programs saving at once keep every server (#18).
+    #[test]
+    fn programs_saving_at_once_keep_every_server() {
+        let folder = tempfile::tempdir().unwrap();
+        let path = file(folder.path());
+        let programs: Vec<_> = (0..4)
+            .map(|program| {
+                let names: Vec<String> = (0..10).map(|at| format!("p{program}-{at}")).collect();
+                std::process::Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact", "servers::tests::saver", "--test-threads=1"])
+                    .env(SAVER, format!("{}|{}", path.display(), names.join(",")))
+                    .stdout(std::process::Stdio::null())
+                    .spawn()
+                    .unwrap()
+            })
+            .collect();
+        for mut program in programs {
+            assert!(program.wait().unwrap().success());
+        }
+        assert_eq!(list(&path).unwrap().len(), 40);
+        assert_eq!(revision(&path).unwrap(), 40, "one write each");
     }
 
     #[test]
@@ -415,7 +533,6 @@ mod tests {
             one.join().unwrap().unwrap();
         }
         assert_eq!(list(&path).unwrap().len(), 8);
-        assert!(!path.with_file_name("servers.json.lock").exists());
         std::fs::write(&path, "{\"schema_version\": 2, \"servers\": []}").unwrap();
         assert_eq!(list(&path).unwrap_err().code, "unsupported_server_schema");
         std::fs::write(&path, "not json").unwrap();
