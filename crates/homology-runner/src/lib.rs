@@ -32,6 +32,7 @@ pub mod client;
 pub mod complete;
 pub mod env;
 pub mod exec;
+pub mod files;
 pub mod fs;
 pub mod params;
 #[cfg(test)]

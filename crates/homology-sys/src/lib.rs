@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 
 use fs4::fs_std::FileExt;
 
+pub mod bundled;
 #[cfg(unix)]
 pub mod local_socket;
 
