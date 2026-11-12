@@ -169,7 +169,8 @@ pub fn probe(path: &Path, timeout: Duration) -> RunnerResult<Value> {
         command.arg("--version");
     }
     command.current_dir(std::env::temp_dir());
-    let ran = crate::exec::run(command, timeout).map_err(|why| RunnerError::new(TOOLCHAIN_PROBE_FAILED, why))?;
+    let ran = crate::exec::run(command, timeout)
+        .map_err(|error| RunnerError::new(TOOLCHAIN_PROBE_FAILED, crate::exec::cannot_start(&error)))?;
     if ran.timed_out {
         return Err(RunnerError::new(
             TOOLCHAIN_PROBE_FAILED,

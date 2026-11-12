@@ -250,7 +250,7 @@ pub const MAX_PROBE_TIMEOUT: Duration = Duration::from_secs(600);
 /// process group of its own, ended whole past it), `input` on its stdin:
 /// its stdout, or why not.
 pub fn stdout_of(command: Command, input: Option<&[u8]>, timeout: Duration) -> Result<String, String> {
-    let ran = crate::exec::run_with(command, timeout, input)?;
+    let ran = crate::exec::run_with(command, timeout, input).map_err(|error| crate::exec::cannot_start(&error))?;
     if ran.timed_out {
         return Err(format!("it did not finish within {} s", timeout.as_secs()));
     }
