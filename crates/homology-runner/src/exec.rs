@@ -19,7 +19,10 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
-use crate::env::MAX_OUTPUT;
+/// The most of a program's stdout or stderr kept: the rest is read and
+/// dropped, so the program never blocks on a full pipe and the runner's
+/// memory stays bounded (homology#2).
+pub const MAX_OUTPUT: u64 = 16 * 1024 * 1024;
 use crate::protocol::INVALID_PARAMS;
 use crate::{JsonMap, RunnerError, RunnerResult};
 
@@ -93,28 +96,20 @@ fn catch(pipe: Option<impl Read + Send + 'static>) -> Arc<Mutex<Caught>> {
     caught
 }
 
-/// End the process group `leader` leads (Unix), or its process tree
-/// (Windows).
-fn end_group(leader: u32) {
-    if cfg!(windows) {
-        let _ = crate::sys::command("taskkill").args(["/T", "/F", "/PID", &leader.to_string()]).status();
-    } else {
-        let _ = crate::sys::command("kill").args(["-KILL", "--", &format!("-{leader}")]).status();
-    }
-}
-
 /// Run `command` (configured, not started) in a process group of its own
 /// for at most `timeout`. Past it the group ends while its leader still
 /// runs (not yet reaped, so its id names no one else's). Once the command
 /// ended by itself, what it left in the background stays, and its output
-/// is waited for at most [`DRAIN`].
-pub fn run(command: Command, timeout: Duration) -> Result<Ran, String> {
+/// is waited for at most [`DRAIN`]. An error only when it could not be
+/// started (or waited for): the system's, so a caller can tell a program
+/// not found ([`cannot_start`] words it).
+pub fn run(command: Command, timeout: Duration) -> std::io::Result<Ran> {
     run_with(command, timeout, None)
 }
 
 /// [`run`], `input` written to its stdin (then closed) when given; stdin
 /// empty otherwise.
-pub fn run_with(mut command: Command, timeout: Duration, input: Option<&[u8]>) -> Result<Ran, String> {
+pub fn run_with(mut command: Command, timeout: Duration, input: Option<&[u8]>) -> std::io::Result<Ran> {
     let stdin = if input.is_some() { Stdio::piped() } else { Stdio::null() };
     command.stdin(stdin).stdout(Stdio::piped()).stderr(Stdio::piped());
     #[cfg(unix)]
@@ -122,7 +117,7 @@ pub fn run_with(mut command: Command, timeout: Duration, input: Option<&[u8]>) -
         use std::os::unix::process::CommandExt;
         command.process_group(0);
     }
-    let mut child = command.spawn().map_err(|error| format!("cannot start it: {error}"))?;
+    let mut child = command.spawn()?;
     // Written while its output is read, so that neither waits on a full pipe.
     if let (Some(mut pipe), Some(input)) = (child.stdin.take(), input) {
         let input = input.to_vec();
@@ -139,12 +134,12 @@ pub fn run_with(mut command: Command, timeout: Duration, input: Option<&[u8]>) -
             Ok(Some(status)) => break (Some(status), false),
             Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
             Ok(None) => {
-                end_group(child.id());
+                homology_sys::end_group(child.id());
                 let _ = child.kill();
                 let _ = child.wait();
                 break (None, true);
             }
-            Err(error) => return Err(error.to_string()),
+            Err(error) => return Err(error),
         }
     };
     let drained = Instant::now() + DRAIN;
@@ -253,7 +248,12 @@ pub fn op(params: &JsonMap) -> RunnerResult<Value> {
     command.envs(asked.env.iter().map(|(name, value)| (name, value)));
     run_with(command, asked.timeout, asked.stdin.as_deref().map(str::as_bytes))
         .map(|ran| ran.to_json())
-        .map_err(|why| RunnerError::new(EXEC_FAILED, why))
+        .map_err(|error| RunnerError::new(EXEC_FAILED, cannot_start(&error)))
+}
+
+/// Why a command could not be started, in the words callers show.
+pub fn cannot_start(error: &std::io::Error) -> String {
+    format!("cannot start it: {error}")
 }
 
 #[cfg(test)]

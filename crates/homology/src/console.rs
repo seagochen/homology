@@ -189,7 +189,7 @@ impl Console {
         let reaped = lock(&self.transcript).ended.is_some();
         if let (Some(pid), false) = (pid, reaped) {
             match &self.machine {
-                Machine::Local => end_local_group(pid),
+                Machine::Local => homology_sys::end_group(pid),
                 Machine::Ssh { cx, target } => {
                     // Over the network: not on the caller's thread.
                     let (cx, target) = (cx.clone(), target.clone());
@@ -218,17 +218,6 @@ impl Drop for Console {
 /// leads on this computer (Unix).
 fn signal_local_group(pid: u32, signal: &str) -> std::io::Result<std::process::ExitStatus> {
     homology_sys::command("kill").arg(format!("-{signal}")).arg("--").arg(format!("-{pid}")).status()
-}
-
-/// End the console `pid` on this computer with all it runs: its process
-/// group (Unix; the console leads it, [`local_command`]) or its process
-/// tree (Windows).
-fn end_local_group(pid: u32) {
-    if cfg!(windows) {
-        let _ = homology_sys::command("taskkill").args(["/T", "/F", "/PID", &pid.to_string()]).status();
-    } else {
-        let _ = signal_local_group(pid, "KILL");
-    }
 }
 
 /// The consoles open in one session of the caller's, by id.
@@ -279,21 +268,10 @@ fn local_command(kind: Kind, python: &str, dir: Option<&str>) -> Command {
     command
 }
 
-/// `dir` quoted for a POSIX shell, a leading `~` kept outside the quotes
-/// so the shell expands it (as `SshTarget::quoted_path` does): a folder in
-/// the home is written `~/…` (#10).
-fn quoted_dir(dir: &str) -> String {
-    match dir.strip_prefix('~') {
-        Some("") => "~".into(),
-        Some(rest) if rest.starts_with('/') => format!("~/{}", shell_quote(rest.trim_start_matches('/'))),
-        _ => shell_quote(dir),
-    }
-}
-
 /// The script that runs a console of `kind` on a host, in `dir` when it is
 /// there: it prints its process id first ([`PID_MARK`]).
 fn host_script(kind: Kind, python: &str, dir: Option<&str>) -> String {
-    let place = dir.map(|dir| format!("cd {} 2>/dev/null; ", quoted_dir(dir))).unwrap_or_default();
+    let place = dir.map(|dir| format!("cd {} 2>/dev/null; ", homology_ssh::quoted_dir(dir))).unwrap_or_default();
     let run = match kind {
         Kind::Python => format!("exec {} -u -i -q", shell_quote(python)),
         Kind::Shell => {
@@ -569,15 +547,10 @@ mod tests {
         }
     }
 
-    /// A folder in the home keeps its `~` for the shell; others are quoted whole.
+    /// A folder in the home keeps its `~` for the shell
+    /// ([`homology_ssh::quoted_dir`]).
     #[test]
     fn a_folder_in_the_home_is_gone_to_by_its_tilde() {
-        assert_eq!(quoted_dir("~"), "~");
-        assert_eq!(quoted_dir("~/work"), "~/'work'");
-        assert_eq!(quoted_dir("~/my 'dir'"), r"~/'my '\''dir'\'''");
-        assert_eq!(quoted_dir("/srv/a b"), "'/srv/a b'");
-        // `~user` is not the home: quoted as it is.
-        assert_eq!(quoted_dir("~other/x"), "'~other/x'");
         assert!(host_script(Kind::Shell, "/env/bin/python", Some("~/work")).starts_with("cd ~/'work' 2>/dev/null; "));
     }
 

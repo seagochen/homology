@@ -26,7 +26,7 @@ Homology 是 AnnotaryCat 和 Crescent 共用的 runner 与远程访问层。它�
 
 ## 4. 不 panic
 
-工作区 lint 禁止 `unwrap`、`expect`、`panic!`、`todo!`、`unimplemented!`、`unreachable!`（测试除外），并禁止 `unsafe`。返回错误，不要崩溃。
+工作区 lint 禁止 `unwrap`、`expect`、`panic!`、`todo!`、`unimplemented!`、`unreachable!`（测试除外），并禁止 `unsafe`。唯一的例外是 `homology-winframe`：Windows 窗口消息只能经 Win32 处理，它在 crate 级别改为 `deny`，只在 `ffi` 模块中允许 `unsafe`。返回错误，不要崩溃。
 
 ## 5. 风格
 

@@ -30,6 +30,9 @@ homology          lib         the caller's side: a program's runners carried for
                               host by their hash and talked to over ssh … serve, one session per host
                               console: a shell or an interactive Python on this computer or a host,
                               read back by offset, interrupted as Ctrl+C would
+homology-winframe lib         the Windows title bar a program draws inside the system's frame (WM_NCCALCSIZE,
+                              WM_NCHITTEST, WM_DPICHANGED); does nothing elsewhere. The one crate allowed
+                              unsafe code, in its ffi module alone
 ```
 
 A program gives `homology-ssh` its names (`App`: its askpass helper, its

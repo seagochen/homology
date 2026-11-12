@@ -1,0 +1,35 @@
+[package]
+name = "homology-winframe"
+description = "The Windows title bar a program draws inside the system's frame (WM_NCCALCSIZE, WM_NCHITTEST, WM_DPICHANGED), shared by Crescent and AnnotaryCat"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+# Not the workspace lints: they forbid unsafe code outright, and a window's
+# messages are handled only through Win32. Unsafe stays denied except in the
+# one `ffi` module; every other rule is the workspace's (AGENTS.md).
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+dbg_macro = "warn"
+todo = "deny"
+unimplemented = "deny"
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+unreachable = "deny"
+
+[dependencies]
+raw-window-handle = "0.6"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.52", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
