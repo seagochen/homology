@@ -23,7 +23,8 @@ use crate::JsonMap;
 pub const OPS: &[&str] = &[
     "hello", "ping", "shutdown", "fs.list", "fs.read", "fs.read_bytes", "fs.write", "fs.mkdir", "fs.move", "fs.copy",
     "fs.delete", "fs.search", "env.discover", "env.probe", "code.check", "toolchain.discover", "toolchain.probe",
-    "code.exec", "code.complete",
+    "code.exec", "code.complete", "files.list", "files.stat", "files.mkdir", "files.rename", "files.delete",
+    "files.chmod", "files.read", "files.write", "files.finish", "files.hash",
 ];
 
 /// A runner as a program serves it: its name and version, as `hello` gives
@@ -82,6 +83,7 @@ impl Runner {
             "code.exec" => return crate::exec::op(params),
             "code.complete" => return crate::complete::run(self, &crate::complete::asked(params)?),
             op if op.starts_with("fs.") && OPS.contains(&op) => return crate::fs::op(op, params),
+            op if crate::files::OPS.contains(&op) => return crate::files::op(op, params),
             _ => {}
         }
         if self.ops.contains(&op) {
@@ -336,6 +338,22 @@ mod tests {
         let ops = hello["ops"].as_array().unwrap();
         assert!(ops.contains(&json!("fs.search")) && ops.contains(&json!("echo")), "{ops:?}");
         assert_eq!(replies[1], Message::Reply { id: 2, outcome: Ok(json!({})) });
+    }
+
+    /// The file manager's operations (#23): every one listed by `hello`,
+    /// and answered through a session.
+    #[test]
+    fn the_file_manager_s_operations_are_listed_and_answered() {
+        assert!(crate::files::OPS.iter().all(|op| OPS.contains(op)), "every files.* listed");
+        let folder = tempfile::tempdir().unwrap();
+        std::fs::write(folder.path().join("a.txt"), "abc").unwrap();
+        let path = serde_json::to_string(&folder.path().join("a.txt")).unwrap();
+        let stat = format!(r#"{{"id":2,"op":"files.stat","params":{{"path":{path}}}}}"#);
+        let (_, replies) = session(&[HELLO, &stat]);
+        let Message::Reply { outcome: Ok(found), .. } = &replies[1] else { panic!("{:?}", replies[1]) };
+        assert_eq!((found["exists"].as_bool(), found["size"].as_u64()), (Some(true), Some(3)));
+        let Message::Reply { outcome: Ok(hello), .. } = &replies[0] else { panic!("{:?}", replies[0]) };
+        assert!(hello["ops"].as_array().unwrap().contains(&json!("files.read")));
     }
 
     #[test]
