@@ -19,7 +19,10 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
-use crate::env::MAX_OUTPUT;
+/// The most of a program's stdout or stderr kept: the rest is read and
+/// dropped, so the program never blocks on a full pipe and the runner's
+/// memory stays bounded (homology#2).
+pub const MAX_OUTPUT: u64 = 16 * 1024 * 1024;
 use crate::protocol::INVALID_PARAMS;
 use crate::{JsonMap, RunnerError, RunnerResult};
 
@@ -93,16 +96,6 @@ fn catch(pipe: Option<impl Read + Send + 'static>) -> Arc<Mutex<Caught>> {
     caught
 }
 
-/// End the process group `leader` leads (Unix), or its process tree
-/// (Windows).
-fn end_group(leader: u32) {
-    if cfg!(windows) {
-        let _ = crate::sys::command("taskkill").args(["/T", "/F", "/PID", &leader.to_string()]).status();
-    } else {
-        let _ = crate::sys::command("kill").args(["-KILL", "--", &format!("-{leader}")]).status();
-    }
-}
-
 /// Run `command` (configured, not started) in a process group of its own
 /// for at most `timeout`. Past it the group ends while its leader still
 /// runs (not yet reaped, so its id names no one else's). Once the command
@@ -139,7 +132,7 @@ pub fn run_with(mut command: Command, timeout: Duration, input: Option<&[u8]>) -
             Ok(Some(status)) => break (Some(status), false),
             Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
             Ok(None) => {
-                end_group(child.id());
+                homology_sys::end_group(child.id());
                 let _ = child.kill();
                 let _ = child.wait();
                 break (None, true);

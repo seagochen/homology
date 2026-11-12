@@ -36,7 +36,7 @@ mod target;
 
 pub use context::{App, Context};
 pub use ssh::{run, run_with_input, run_with_password, session_command};
-pub use target::{shell_quote, SshTarget};
+pub use target::{quoted_dir, shell_quote, SshTarget};
 
 use std::fmt;
 

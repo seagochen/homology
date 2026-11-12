@@ -10,22 +10,37 @@ use serde_json::Value;
 use crate::protocol::{RunnerError, RunnerResult, INVALID_PARAMS};
 use crate::JsonMap;
 
-/// A path the caller names on the runner's computer: absolute, or `~/…`
-/// in the home folder.
+/// A path the caller names on the runner's computer: absolute, or in the
+/// home folder ([`homology_sys::home_dir`]: `~`, `~/…`, `~\…`). The one rule
+/// every operation reads paths by.
 pub fn host_path(text: &str) -> RunnerResult<PathBuf> {
-    let expanded = match text.strip_prefix("~/") {
-        Some(rest) => std::env::var("HOME")
-            .map(|home| format!("{home}/{rest}"))
-            .map_err(|_| RunnerError::new(INVALID_PARAMS, "no HOME for ~/"))?,
-        None if text == "~" => std::env::var("HOME").map_err(|_| RunnerError::new(INVALID_PARAMS, "no HOME for ~"))?,
-        None => text.to_string(),
+    let home = || homology_sys::home_dir().ok_or_else(|| RunnerError::new(INVALID_PARAMS, "no home folder for ~"));
+    let path = match text.strip_prefix("~/").or_else(|| text.strip_prefix("~\\")) {
+        Some(rest) => home()?.join(rest),
+        None if text == "~" => home()?,
+        None => PathBuf::from(text),
     };
-    let path = PathBuf::from(expanded);
     if path.is_absolute() {
         Ok(path)
     } else {
         Err(RunnerError::new(INVALID_PARAMS, format!("{text:?} is not an absolute path")))
     }
+}
+
+/// Those of the environment variables `names` that are set and not empty,
+/// with their values: what a computer's places are found from.
+pub fn set_vars(names: &[&str]) -> Vec<(String, String)> {
+    names
+        .iter()
+        .filter_map(|name| {
+            std::env::var(name).ok().filter(|value| !value.is_empty()).map(|value| (name.to_string(), value))
+        })
+        .collect()
+}
+
+/// The folders of this process's `PATH`, in order.
+pub fn path_dirs() -> Vec<PathBuf> {
+    std::env::var_os("PATH").map(|path| std::env::split_paths(&path).collect()).unwrap_or_default()
 }
 
 /// The list of text at `key`; empty when absent (`invalid_params` when it is

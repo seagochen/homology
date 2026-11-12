@@ -120,7 +120,7 @@ pub fn run(runner: &Runner, asked: &Asked) -> RunnerResult<Value> {
         .current_dir(asked.root.as_deref().filter(|root| root.is_dir()).unwrap_or(&cache))
         .env("PYTHONDONTWRITEBYTECODE", "1");
     let output =
-        crate::env::run_with(&mut command, Some(request.to_string().into_bytes()), asked.timeout).map_err(|why| {
+        crate::env::stdout_of(command, Some(request.to_string().as_bytes()), asked.timeout).map_err(|why| {
             if why.contains("did not finish") {
                 RunnerError::new(COMPLETE_TIMEOUT, format!("the completion {why}"))
             } else {

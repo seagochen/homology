@@ -37,6 +37,18 @@ pub fn command(program: impl AsRef<OsStr>) -> Command {
     command
 }
 
+/// End the process group `leader` leads on this computer (Unix: started
+/// with `process_group(0)`), or its process tree (Windows), with all it
+/// runs. Called while the leader is not yet reaped, so its id names no one
+/// else's.
+pub fn end_group(leader: u32) {
+    if cfg!(windows) {
+        let _ = command("taskkill").args(["/T", "/F", "/PID", &leader.to_string()]).status();
+    } else {
+        let _ = command("kill").args(["-KILL", "--", &format!("-{leader}")]).status();
+    }
+}
+
 /// A file's lock within the process ([`file_lock`]).
 pub type FileLock = Arc<Mutex<()>>;
 

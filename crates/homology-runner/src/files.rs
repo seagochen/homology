@@ -28,7 +28,7 @@
 //! answers for the caller's own computer: it calls [`op`] directly.
 
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use base64::Engine;
 use serde_json::{json, Value};
@@ -53,21 +53,6 @@ pub const OPS: &[&str] = &[
     "files.list", "files.stat", "files.mkdir", "files.rename", "files.delete", "files.chmod", "files.read",
     "files.write", "files.finish", "files.hash",
 ];
-
-/// A path the caller names: absolute, or in the home folder (`~`, `~/…`).
-fn place(text: &str) -> RunnerResult<PathBuf> {
-    let home = || homology_sys::home_dir().ok_or_else(|| RunnerError::new(INVALID_PARAMS, "no home folder for ~"));
-    let path = match text.strip_prefix("~/").or_else(|| text.strip_prefix("~\\")) {
-        Some(rest) => home()?.join(rest),
-        None if text == "~" => home()?,
-        None => PathBuf::from(text),
-    };
-    if path.is_absolute() {
-        Ok(path)
-    } else {
-        Err(RunnerError::new(INVALID_PARAMS, format!("{text:?} is not an absolute path")))
-    }
-}
 
 /// A failure of `what` on `path`, by why: not there, not allowed, else IO.
 fn failed(what: &str, path: &Path, error: &std::io::Error) -> RunnerError {
@@ -266,7 +251,7 @@ fn hash(path: &Path) -> RunnerResult<Value> {
 /// Answer `files.*`: the runner's operation, and what a caller calls
 /// directly for its own computer.
 pub fn op(op: &str, params: &JsonMap) -> RunnerResult<Value> {
-    let path = |key: &str| place(params::text(params, key)?);
+    let path = |key: &str| params::host_path(params::text(params, key)?);
     match op {
         "files.list" => list(&path("dir")?),
         "files.stat" => Ok(stat(&path("path")?)),

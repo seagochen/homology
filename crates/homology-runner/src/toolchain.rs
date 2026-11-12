@@ -67,14 +67,9 @@ pub struct Places {
 impl Places {
     /// This computer's.
     pub fn here() -> Places {
-        let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from);
-        let vars = ["CARGO_HOME", "CUDA_PATH", "CUDA_HOME"]
-            .iter()
-            .filter_map(|name| {
-                std::env::var(name).ok().filter(|value| !value.is_empty()).map(|value| (name.to_string(), value))
-            })
-            .collect();
-        let path = std::env::var_os("PATH").map(|path| std::env::split_paths(&path).collect()).unwrap_or_default();
+        let home = homology_sys::home_dir();
+        let (vars, path) =
+            (crate::params::set_vars(&["CARGO_HOME", "CUDA_PATH", "CUDA_HOME"]), crate::params::path_dirs());
         let (cuda_parents, suffixes) = if cfg!(windows) {
             (Vec::new(), vec![".exe", ".cmd"])
         } else {

@@ -126,14 +126,13 @@ pub fn run(
         });
         let mut command = crate::sys::command(python);
         command.arg("-B").arg(checker.join("homology_check.py")).current_dir(&work).env("PYTHONDONTWRITEBYTECODE", "1");
-        let output =
-            crate::env::run_with(&mut command, Some(asked.to_string().into_bytes()), timeout).map_err(|why| {
-                if why.contains("did not finish") {
-                    RunnerError::new(CHECK_TIMEOUT, format!("the check {why}"))
-                } else {
-                    failed(format!("the checker could not run with {}: {why}", python.display()))
-                }
-            })?;
+        let output = crate::env::stdout_of(command, Some(asked.to_string().as_bytes()), timeout).map_err(|why| {
+            if why.contains("did not finish") {
+                RunnerError::new(CHECK_TIMEOUT, format!("the check {why}"))
+            } else {
+                failed(format!("the checker could not run with {}: {why}", python.display()))
+            }
+        })?;
         let answer: Value = serde_json::from_str(output.trim())
             .map_err(|error| failed(format!("the checker's answer is not JSON: {error}")))?;
         if !answer["problems"].is_array() {

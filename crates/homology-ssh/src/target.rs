@@ -54,11 +54,7 @@ impl SshTarget {
 
     /// The path quoted for a POSIX shell, keeping a leading `~` expandable.
     pub fn quoted_path(&self) -> String {
-        match self.path.strip_prefix('~') {
-            Some("") => "~".into(),
-            Some(rest) => format!("~/{}", shell_quote(rest.trim_start_matches('/'))),
-            None => shell_quote(&self.path),
-        }
+        quoted_dir(&self.path)
     }
 }
 
@@ -74,6 +70,18 @@ fn valid_host(host: &str) -> bool {
         && ok(name)
         && ok(user)
         && host.matches('@').count() <= 1
+}
+
+/// `path` quoted for a POSIX shell, a leading `~` kept outside the quotes
+/// so the shell expands it: `~` alone, a folder in the home as `~/…`; any
+/// other `~` (another user's home, `~user`) is quoted whole, never expanded.
+/// The one rule remote commands name folders by.
+pub fn quoted_dir(path: &str) -> String {
+    match path.strip_prefix('~') {
+        Some("") => "~".into(),
+        Some(rest) if rest.starts_with('/') => format!("~/{}", shell_quote(rest.trim_start_matches('/'))),
+        _ => shell_quote(path),
+    }
 }
 
 /// Single-quote `text` for a POSIX shell: the one implementation.
@@ -96,6 +104,17 @@ impl fmt::Display for SshTarget {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A folder in the home keeps its `~` for the shell; others are quoted whole.
+    #[test]
+    fn a_folder_in_the_home_is_gone_to_by_its_tilde() {
+        assert_eq!(quoted_dir("~"), "~");
+        assert_eq!(quoted_dir("~/work"), "~/'work'");
+        assert_eq!(quoted_dir("~/my 'dir'"), r"~/'my '\''dir'\'''");
+        assert_eq!(quoted_dir("/srv/a b"), "'/srv/a b'");
+        // `~user` is not the home: quoted as it is.
+        assert_eq!(quoted_dir("~other/x"), "'~other/x'");
+    }
 
     #[test]
     fn shell_quoting_survives_empty_text_quotes_and_spaces() {

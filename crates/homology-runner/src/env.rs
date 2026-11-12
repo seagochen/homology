@@ -9,10 +9,9 @@
 //! code of the user's runs.
 
 use std::collections::BTreeSet;
-use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::process::Command;
+use std::time::Duration;
 
 use serde_json::{json, Value};
 
@@ -46,14 +45,13 @@ pub struct Places {
 impl Places {
     /// This computer's.
     pub fn here(roots: Vec<PathBuf>) -> Places {
-        let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from);
-        let vars = ["CONDA_PREFIX", "CONDA_EXE", "MAMBA_ROOT_PREFIX", "APPDATA", "LOCALAPPDATA", "XDG_DATA_HOME"]
-            .iter()
-            .filter_map(|name| {
-                std::env::var(name).ok().filter(|value| !value.is_empty()).map(|value| (name.to_string(), value))
-            })
-            .collect();
-        let path = std::env::var_os("PATH").map(|path| std::env::split_paths(&path).collect()).unwrap_or_default();
+        let home = homology_sys::home_dir();
+        let (vars, path) = (
+            crate::params::set_vars(&[
+                "CONDA_PREFIX", "CONDA_EXE", "MAMBA_ROOT_PREFIX", "APPDATA", "LOCALAPPDATA", "XDG_DATA_HOME",
+            ]),
+            crate::params::path_dirs(),
+        );
         let system = if cfg!(windows) {
             Vec::new()
         } else {
@@ -248,61 +246,20 @@ pub const PROBE_TIMEOUT: Duration = Duration::from_secs(30);
 /// The longest `env.probe` may be asked to wait.
 pub const MAX_PROBE_TIMEOUT: Duration = Duration::from_secs(600);
 
-/// The most of a program's stdout or stderr kept ([`run_with`]): the rest
-/// is read and dropped, so the program never blocks on a full pipe and the
-/// runner's memory stays bounded (homology#2).
-pub const MAX_OUTPUT: u64 = 16 * 1024 * 1024;
-
-/// Run `command` for at most `timeout`; its stdout, or why not.
-fn run_for(command: &mut Command, timeout: Duration) -> Result<String, String> {
-    run_with(command, None, timeout)
-}
-
-/// [`run_for`], with `input` on its stdin.
-pub fn run_with(command: &mut Command, input: Option<Vec<u8>>, timeout: Duration) -> Result<String, String> {
-    let stdin = if input.is_some() { Stdio::piped() } else { Stdio::null() };
-    let mut child = command
-        .stdin(stdin)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| format!("cannot start it: {error}"))?;
-    if let (Some(input), Some(mut pipe)) = (input, child.stdin.take()) {
-        std::thread::spawn(move || {
-            use std::io::Write as _;
-            let _ = pipe.write_all(&input);
-        });
+/// Run `command` for at most `timeout` ([`crate::exec::run_with`]: in a
+/// process group of its own, ended whole past it), `input` on its stdin:
+/// its stdout, or why not.
+pub fn stdout_of(command: Command, input: Option<&[u8]>, timeout: Duration) -> Result<String, String> {
+    let ran = crate::exec::run_with(command, timeout, input)?;
+    if ran.timed_out {
+        return Err(format!("it did not finish within {} s", timeout.as_secs()));
     }
-    let read = |pipe: Option<Box<dyn Read + Send>>| {
-        std::thread::spawn(move || {
-            let mut text = Vec::new();
-            if let Some(mut pipe) = pipe {
-                let _ = (&mut pipe).take(MAX_OUTPUT).read_to_end(&mut text);
-                let _ = std::io::copy(&mut pipe, &mut std::io::sink());
-            }
-            String::from_utf8_lossy(&text).into_owned()
-        })
-    };
-    let stdout = read(child.stdout.take().map(|pipe| Box::new(pipe) as Box<dyn Read + Send>));
-    let stderr = read(child.stderr.take().map(|pipe| Box::new(pipe) as Box<dyn Read + Send>));
-    let deadline = Instant::now() + timeout;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(25)),
-            Ok(None) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(format!("it did not finish within {} s", timeout.as_secs()));
-            }
-            Err(error) => return Err(error.to_string()),
+    match ran.code {
+        Some(0) => Ok(ran.stdout),
+        code => {
+            let status = code.map_or_else(|| "a signal".to_string(), |code| format!("exit code {code}"));
+            Err(format!("it ended with {status}: {}", ran.stderr.trim().lines().last().unwrap_or_default()))
         }
-    };
-    let (stdout, stderr) = (stdout.join().unwrap_or_default(), stderr.join().unwrap_or_default());
-    if status.success() {
-        Ok(stdout)
-    } else {
-        Err(format!("it ended with {status}: {}", stderr.trim().lines().last().unwrap_or_default()))
     }
 }
 
@@ -314,7 +271,7 @@ fn probe_once(python: &Path, torch: bool, timeout: Duration) -> Result<Value, St
     if torch {
         command.arg("--torch");
     }
-    answer_of(&run_for(&mut command, timeout)?)
+    answer_of(&stdout_of(command, None, timeout)?)
 }
 
 /// The probe's answer in what it printed: the JSON after [`MARKER`] on the
@@ -329,7 +286,7 @@ pub fn answer_of(output: &str) -> Result<Value, String> {
 fn nvidia_smi() -> Option<Value> {
     let mut command = crate::sys::command("nvidia-smi");
     command.args(["--query-gpu=name,memory.total", "--format=csv,noheader,nounits"]);
-    gpus_of(&run_for(&mut command, Duration::from_secs(10)).ok()?)
+    gpus_of(&stdout_of(command, None, Duration::from_secs(10)).ok()?)
 }
 
 /// The GPUs in what `nvidia-smi --query-gpu=name,memory.total
@@ -390,6 +347,43 @@ pub fn probe(python: &Path, timeout: Duration) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::time::Instant;
+
+    /// A command that leaves a process behind holding its output open
+    /// neither hangs [`stdout_of`] once it ended, nor outlives the time
+    /// given: the whole group is ended (homology#27).
+    #[cfg(unix)]
+    #[test]
+    fn what_a_command_leaves_running_does_not_hold_it() {
+        let started = Instant::now();
+        let mut ended = Command::new("sh");
+        ended.args(["-c", "sleep 7411 & echo done"]);
+        assert_eq!(stdout_of(ended, None, Duration::from_secs(20)).unwrap().trim(), "done");
+        assert!(started.elapsed() < Duration::from_secs(10), "{:?}", started.elapsed());
+        let started = Instant::now();
+        let mut hangs = Command::new("sh");
+        hangs.args(["-c", "sleep 7412 & sleep 7413"]);
+        let said = stdout_of(hangs, Some(b"input"), Duration::from_secs(1)).unwrap_err();
+        assert!(said.contains("did not finish"), "{said}");
+        assert!(started.elapsed() < Duration::from_secs(10), "{:?}", started.elapsed());
+        // No `sleep 7412` or `sleep 7413` left (Linux: read from `/proc`).
+        #[cfg(target_os = "linux")]
+        {
+            let running = |wanted: &[u8]| {
+                std::fs::read_dir("/proc").unwrap().flatten().any(|entry| {
+                    let stat = std::fs::read_to_string(entry.path().join("stat")).unwrap_or_default();
+                    let zombie = stat.rsplit_once(')').is_some_and(|(_, rest)| rest.trim_start().starts_with('Z'));
+                    std::fs::read(entry.path().join("cmdline")).is_ok_and(|line| line == wanted) && !zombie
+                })
+            };
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while (running(b"sleep\x007412\x00") || running(b"sleep\x007413\x00")) && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            assert!(!running(b"sleep\x007412\x00") && !running(b"sleep\x007413\x00"), "the group was left running");
+        }
+    }
 
     fn places(home: &Path) -> Places {
         Places {
