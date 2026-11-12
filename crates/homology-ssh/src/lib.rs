@@ -24,6 +24,7 @@
 //! is process-wide.
 
 pub mod askpass;
+pub mod browse;
 mod context;
 pub mod host_key;
 pub mod keys;
@@ -87,4 +88,14 @@ pub const CODES: &[&str] = &[
     "ssh_keys_unavailable",
     "ssh_keys_failed",
     "remote_failed",
+    "remote_directory_missing",
+    "remote_directory_denied",
+    "invalid_server",
+    "server_not_found",
+    "server_name_exists",
+    "server_changed",
+    "server_ambiguous",
+    "server_store_read_failed",
+    "server_store_write_failed",
+    "unsupported_server_schema",
 ];
