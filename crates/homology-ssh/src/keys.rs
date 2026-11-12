@@ -55,10 +55,7 @@ pub(crate) fn comment(name_of_app: &str) -> String {
 /// files here, no line on the host.
 pub fn set_up(cx: &Context, target: &SshTarget, password: &Password) -> SshResult<HostKeyLogin> {
     let directory = directory(cx)?;
-    let failed = |error: std::io::Error| SshError::new("ssh_keys_failed", format!("{}: {error}", directory.display()));
-    sys::private_dir(&directory).map_err(failed)?;
-    #[cfg(windows)]
-    icacls_owner_only(&directory)?;
+    prepared(&directory)?;
     let host_part: String =
         target.host.chars().map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' { c } else { '_' }).collect();
     let name = format!("id_ed25519_{host_part}_{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
@@ -99,11 +96,14 @@ pub fn set_up(cx: &Context, target: &SshTarget, password: &Password) -> SshResul
         fingerprint: fingerprint(blob).unwrap_or_default(),
         created_at: now(),
     };
+    // Other programs share the folder: the list is changed under its lock.
+    let lock = hosts_lock(&directory);
     let mut hosts: Vec<HostKeyLogin> = read_hosts(&directory);
     let replaced: Vec<HostKeyLogin> = hosts.iter().filter(|other| other.matches(target)).cloned().collect();
     hosts.retain(|other| !other.matches(target));
     hosts.push(login.clone());
-    if let Err(error) = write_hosts(&directory, &hosts) {
+    let written = lock.and_then(|_lock| write_hosts(&directory, &hosts));
+    if let Err(error) = written {
         let _ = ssh::run_with_identity(cx, target, &remove_script(cx.app().name, &line), &private);
         cleanup(&private);
         return Err(error);
@@ -130,6 +130,7 @@ pub struct Removed {
 /// The local key goes even when the host cannot be reached.
 pub fn remove(cx: &Context, host: &str, port: Option<u16>) -> SshResult<Removed> {
     let directory = directory(cx)?;
+    let _lock = hosts_lock(&directory)?;
     let mut hosts = read_hosts(&directory);
     let position = hosts
         .iter()
@@ -150,6 +151,91 @@ pub fn remove(cx: &Context, host: &str, port: Option<u16>) -> SshResult<Removed>
     Ok(Removed { login, remote_cleaned: remote.is_ok(), remote_error: remote.err().map(|error| error.message) })
 }
 
+/// The keys folder made if need be, readable by the user alone.
+fn prepared(directory: &Path) -> SshResult<()> {
+    let failed = |error: std::io::Error| SshError::new("ssh_keys_failed", format!("{}: {error}", directory.display()));
+    sys::private_dir(directory).map_err(failed)?;
+    #[cfg(windows)]
+    icacls_owner_only(directory)?;
+    Ok(())
+}
+
+/// The lock of the keys folder's host list, which programs sharing the
+/// folder change too (#17).
+fn hosts_lock(directory: &Path) -> SshResult<sys::LockFile> {
+    let hosts = directory.join(crate::logins::HOSTS);
+    sys::LockFile::take(&hosts)
+        .map_err(|error| SshError::new("ssh_keys_failed", format!("{}: {error}", hosts.display())))
+}
+
+/// What moving a program's earlier login keys into the keys folder did:
+/// the hosts that got their key, and those that kept the one already there.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Adopted {
+    pub moved: usize,
+    pub kept: usize,
+}
+
+/// Move the login keys a program set up in `from` (its own folder, from
+/// before the shared one, #17) into the session's keys folder: a host the
+/// folder has no key for yet gets the earlier key (its files copied, under
+/// another name when the folder has a file of that name); a host it has a
+/// key for keeps that one, as does one whose key file is gone. `from` is
+/// left as it was, so moving again changes nothing.
+pub fn adopt(cx: &Context, from: &Path) -> SshResult<Adopted> {
+    let directory = directory(cx)?;
+    let earlier = read_hosts(from);
+    if earlier.is_empty() || same_folder(from, &directory) {
+        return Ok(Adopted::default());
+    }
+    prepared(&directory)?;
+    let _lock = hosts_lock(&directory)?;
+    let failed = |error: std::io::Error| SshError::new("ssh_keys_failed", format!("{}: {error}", directory.display()));
+    let mut hosts = read_hosts(&directory);
+    let mut adopted = Adopted::default();
+    for mut login in earlier {
+        let source = from.join(&login.key);
+        if hosts.iter().any(|other| other.host == login.host && other.port == login.port) || !source.is_file() {
+            adopted.kept += 1;
+            continue;
+        }
+        let name = free_name(&directory, &login.key);
+        let private = directory.join(&name);
+        std::fs::copy(&source, &private).map_err(failed)?;
+        #[cfg(unix)]
+        std::fs::set_permissions(
+            &private,
+            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o600),
+        )
+        .map_err(failed)?;
+        if public_path(&source).is_file() {
+            std::fs::copy(public_path(&source), public_path(&private)).map_err(failed)?;
+        }
+        login.key = name;
+        hosts.push(login);
+        adopted.moved += 1;
+    }
+    if adopted.moved > 0 {
+        write_hosts(&directory, &hosts)?;
+    }
+    Ok(adopted)
+}
+
+/// Whether `one` and `other` are the same folder.
+fn same_folder(one: &Path, other: &Path) -> bool {
+    one == other || one.canonicalize().ok().is_some_and(|one| other.canonicalize().ok() == Some(one))
+}
+
+/// `name`, or `name_2`, `name_3` … , the first no file in `directory` has.
+fn free_name(directory: &Path, name: &str) -> String {
+    let taken =
+        |candidate: &str| directory.join(candidate).exists() || public_path(&directory.join(candidate)).exists();
+    if !taken(name) {
+        return name.to_string();
+    }
+    (2..).map(|at| format!("{name}_{at}")).find(|candidate| !taken(candidate)).unwrap_or_else(|| name.to_string())
+}
+
 /// The public key beside a private key file (`<name>.pub`).
 fn public_path(private: &Path) -> PathBuf {
     let mut path = private.as_os_str().to_owned();
@@ -158,7 +244,7 @@ fn public_path(private: &Path) -> PathBuf {
 }
 
 /// The time now in UTC, as `created_at` records it (`2026-11-10T08:30:00Z`).
-fn now() -> String {
+pub(crate) fn now() -> String {
     let seconds = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |time| time.as_secs());
     utc(seconds)
 }
@@ -329,5 +415,58 @@ mod tests {
             comment.starts_with("tool@") && comment.chars().all(|c| c.is_ascii_alphanumeric() || "@.-_".contains(c)),
             "{comment}"
         );
+    }
+
+    /// A program's earlier keys move into the shared folder (#17): hosts
+    /// it has no key for get theirs, under another name when one is taken;
+    /// a host with a key there keeps it; moving again changes nothing and
+    /// the earlier folder stays as it was.
+    #[test]
+    fn earlier_keys_move_into_the_shared_folder_once() {
+        let (earlier, shared) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let login = |host: &str, key: &str| HostKeyLogin {
+            host: host.into(),
+            port: None,
+            key: key.into(),
+            comment: "tool@pc".into(),
+            fingerprint: format!("SHA256:{host}"),
+            created_at: "2026-10-16T00:00:00Z".into(),
+        };
+        for (folder, name, content) in [
+            (earlier.path(), "id_a", "A"),
+            (earlier.path(), "id_b", "B"),
+            (shared.path(), "id_a", "SHARED A NAME"),
+            (shared.path(), "id_c", "C SHARED"),
+            (earlier.path(), "id_c", "C EARLIER"),
+        ] {
+            std::fs::write(folder.join(name), content).unwrap();
+            std::fs::write(folder.join(format!("{name}.pub")), format!("{content} pub")).unwrap();
+        }
+        let earlier_hosts =
+            [login("me@a", "id_a"), login("me@b", "id_b"), login("me@c", "id_c"), login("me@gone", "id_gone")];
+        write_hosts(earlier.path(), &earlier_hosts).unwrap();
+        write_hosts(shared.path(), &[login("me@c", "id_c")]).unwrap();
+        let cx = Context::new(crate::App { name: "tool", env: "TOOL" });
+        cx.set_keys_dir(shared.path().to_path_buf());
+
+        assert_eq!(adopt(&cx, earlier.path()).unwrap(), Adopted { moved: 2, kept: 2 });
+        let hosts = read_hosts(shared.path());
+        let key_of = |host: &str| hosts.iter().find(|login| login.host == host).map(|login| login.key.clone());
+        assert_eq!(key_of("me@a").as_deref(), Some("id_a_2"), "id_a was taken");
+        assert_eq!(std::fs::read_to_string(shared.path().join("id_a_2")).unwrap(), "A");
+        assert_eq!(std::fs::read_to_string(shared.path().join("id_a_2.pub")).unwrap(), "A pub");
+        assert_eq!(key_of("me@b").as_deref(), Some("id_b"));
+        assert_eq!(std::fs::read_to_string(shared.path().join("id_c")).unwrap(), "C SHARED", "kept");
+        assert!(key_of("me@gone").is_none(), "no key file: nothing to move");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(shared.path().join("id_b")).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        assert_eq!(adopt(&cx, earlier.path()).unwrap(), Adopted { moved: 0, kept: 4 }, "again: nothing moves");
+        assert_eq!(read_hosts(shared.path()).len(), 3);
+        assert_eq!(read_hosts(earlier.path()), earlier_hosts, "the earlier folder is as it was");
+        assert_eq!(adopt(&cx, shared.path()).unwrap(), Adopted::default(), "the folder itself");
     }
 }

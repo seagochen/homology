@@ -8,11 +8,15 @@
 //!   (a runner's `serve`), with failures under stable codes.
 //! - [`host_key`]: a host `ssh` does not know yet is not accepted blindly:
 //!   the key it presents is shown so the user can compare the fingerprint,
-//!   and recorded in their known hosts only once they confirm.
+//!   and recorded in their known hosts only once they confirm; a key that
+//!   changed is replaced the same way, never silently.
 //! - [`askpass`], [`keys`]: a host that takes only a password is the one
 //!   exception to "never sees a password": the user types it once, askpass
 //!   hands it to `ssh` for one run, and a login key of the program's own is
 //!   installed with it; the password is then dropped and never stored.
+//!
+//! - [`servers`]: the servers the user saved, shared by every program on
+//!   Homology with the login keys set up for them.
 //!
 //! What a session sets (the SSH configuration a sandboxed program uses,
 //! where its login keys live) is in a [`Context`] the caller owns and
@@ -24,6 +28,7 @@ mod context;
 pub mod host_key;
 pub mod keys;
 mod logins;
+pub mod servers;
 pub mod ssh;
 mod target;
 

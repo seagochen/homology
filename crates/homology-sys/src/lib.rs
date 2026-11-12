@@ -1,9 +1,9 @@
 //! The system helpers Homology's crates share, on the standard library
 //! alone: starting a program without a console window, writing a file so
 //! that it is never half-written, taking turns on a file within the
-//! process, the user's home and cache folders, folders only the user
-//! can read, and Unix sockets a program's own processes talk over
-//! ([`local_socket`]).
+//! process or across programs ([`LockFile`]), the user's home, cache and
+//! configuration folders, folders only the user can read, and Unix sockets
+//! a program's own processes talk over ([`local_socket`]).
 
 use std::collections::HashMap;
 use std::ffi::OsStr;
@@ -12,6 +12,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, LazyLock, Mutex, PoisonError};
+use std::time::{Duration, Instant, SystemTime};
 
 #[cfg(unix)]
 pub mod local_socket;
@@ -87,6 +88,86 @@ pub fn cache_home() -> Option<PathBuf> {
     }
     let home = home_dir()?;
     Some(if cfg!(target_os = "macos") { home.join("Library/Caches") } else { home.join(".cache") })
+}
+
+/// The user's configuration folder on this computer: `$XDG_CONFIG_HOME`
+/// when it is an absolute path, else `~/.config` (Linux and other Unix),
+/// `~/Library/Application Support` (macOS), `%APPDATA%` (Windows). None
+/// without a home folder.
+pub fn config_home() -> Option<PathBuf> {
+    config_home_with(&|name| std::env::var_os(name))
+}
+
+/// [`config_home`] with the environment read through `variable`.
+fn config_home_with(variable: &dyn Fn(&str) -> Option<std::ffi::OsString>) -> Option<PathBuf> {
+    let absolute = |name: &str| variable(name).map(PathBuf::from).filter(|path| path.is_absolute());
+    if cfg!(windows) {
+        return absolute("APPDATA");
+    }
+    if let Some(xdg) = absolute("XDG_CONFIG_HOME").filter(|_| !cfg!(target_os = "macos")) {
+        return Some(xdg);
+    }
+    let home = absolute("HOME")?;
+    Some(if cfg!(target_os = "macos") { home.join("Library/Application Support") } else { home.join(".config") })
+}
+
+/// How long [`LockFile::take`] waits for another holder, and how old a
+/// lock file is before it counts as left by a program that died.
+const LOCK_WAIT: Duration = Duration::from_secs(5);
+const LOCK_STALE: Duration = Duration::from_secs(10);
+
+/// A file's lock across programs: a `<name>.lock` file beside it, made
+/// only when none is there (the system's exclusive create), removed when
+/// this is dropped. Hold it around a read-change-write of a file other
+/// programs change too (a list they share). The exclusive create keeps
+/// the threads of one process apart as well.
+#[derive(Debug)]
+pub struct LockFile {
+    path: PathBuf,
+}
+
+impl LockFile {
+    /// Take the lock of `path`, waiting for another program that holds it
+    /// (`TimedOut` after a few seconds); a lock file left by a program that
+    /// died is taken over once it is old.
+    pub fn take(path: &Path) -> io::Result<Self> {
+        let mut name = path.file_name().unwrap_or_default().to_os_string();
+        name.push(".lock");
+        let lock = path.with_file_name(name);
+        if let Some(parent) = lock.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+            fs::create_dir_all(parent)?;
+        }
+        let started = Instant::now();
+        loop {
+            match fs::OpenOptions::new().write(true).create_new(true).open(&lock) {
+                Ok(_) => return Ok(Self { path: lock }),
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                    let age = fs::metadata(&lock)
+                        .and_then(|metadata| metadata.modified())
+                        .ok()
+                        .and_then(|modified| SystemTime::now().duration_since(modified).ok());
+                    if age.is_some_and(|age| age > LOCK_STALE) {
+                        let _ = fs::remove_file(&lock);
+                        continue;
+                    }
+                    if started.elapsed() > LOCK_WAIT {
+                        return Err(io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            format!("{} is held by another program", lock.display()),
+                        ));
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+}
+
+impl Drop for LockFile {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
 }
 
 /// Make `directory` (and its parents) if needed, readable only by the user:
@@ -168,6 +249,62 @@ pub fn atomic_write_bytes(path: &Path, payload: &[u8]) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_configuration_folder_follows_the_system() {
+        use std::ffi::OsString;
+        let home = if cfg!(windows) { r"C:\Users\me" } else { "/home/me" };
+        let environment = |pairs: &'static [(&'static str, &'static str)]| {
+            move |name: &str| pairs.iter().find(|(key, _)| *key == name).map(|(_, value)| OsString::from(value))
+        };
+        let plain = config_home_with(&environment(if cfg!(windows) {
+            &[("APPDATA", r"C:\Users\me\AppData\Roaming"), ("USERPROFILE", r"C:\Users\me")]
+        } else {
+            &[("HOME", "/home/me")]
+        }));
+        let expected = if cfg!(windows) {
+            PathBuf::from(r"C:\Users\me\AppData\Roaming")
+        } else if cfg!(target_os = "macos") {
+            PathBuf::from(home).join("Library/Application Support")
+        } else {
+            PathBuf::from(home).join(".config")
+        };
+        assert_eq!(plain, Some(expected));
+        if cfg!(all(unix, not(target_os = "macos"))) {
+            let xdg = config_home_with(&environment(&[("HOME", "/home/me"), ("XDG_CONFIG_HOME", "/xdg")]));
+            assert_eq!(xdg, Some(PathBuf::from("/xdg")));
+            let relative = config_home_with(&environment(&[("HOME", "/home/me"), ("XDG_CONFIG_HOME", "xdg")]));
+            assert_eq!(relative, Some(PathBuf::from("/home/me/.config")), "a relative one is ignored");
+        }
+        assert_eq!(config_home_with(&|_| None), None);
+    }
+
+    #[test]
+    fn a_lock_file_is_held_once_and_a_dead_holder_s_is_taken_over() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("shared.json");
+        let lock = path.with_file_name("shared.json.lock");
+        {
+            let _held = LockFile::take(&path).unwrap();
+            assert!(lock.is_file());
+            // Another program holds it: one in this process waits its turn.
+            let waiter = {
+                let path = path.clone();
+                std::thread::spawn(move || LockFile::take(&path).map(|_| ()))
+            };
+            std::thread::sleep(Duration::from_millis(50));
+            assert!(!waiter.is_finished());
+            drop(_held);
+            waiter.join().unwrap().unwrap();
+        }
+        assert!(!lock.exists(), "dropped, it is gone");
+        // Left by a program that died long ago: taken over.
+        std::fs::write(&lock, "").unwrap();
+        let old = SystemTime::now() - LOCK_STALE - Duration::from_secs(1);
+        File::options().write(true).open(&lock).unwrap().set_modified(old).unwrap();
+        drop(LockFile::take(&path).unwrap());
+        assert!(!lock.exists());
+    }
 
     #[test]
     fn two_spellings_of_a_file_share_its_lock() {

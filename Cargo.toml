@@ -17,7 +17,7 @@ homology = { path = "crates/homology" }
 serde_json = { version = "1", features = ["preserve_order"] }
 sha2 = "0.10"
 base64 = "0.22"
-uuid = { version = "1", features = ["v4"] }
+uuid = { version = "1", features = ["v4", "v7"] }
 hex = "0.4"
 tempfile = "3"
 proptest = { version = "1", default-features = false, features = ["std"] }
