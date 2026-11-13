@@ -18,7 +18,9 @@ use std::collections::HashMap;
 use std::fmt;
 use std::io::{Read, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, Instant};
 
 use homology_ssh::{shell_quote, Context, SshError, SshTarget};
 
@@ -28,6 +30,9 @@ pub const KEEP: usize = 1024 * 1024;
 const PID_MARK: &str = "__homology_console_pid ";
 /// What an interactive bash without a terminal says once; left out.
 const NO_TERMINAL: [&str; 2] = ["cannot set terminal process group", "no job control in this shell"];
+/// How long after its process ended a pipe still open (held by something
+/// it left in the background) is waited for before it is reported ended.
+const DRAIN: Duration = Duration::from_secs(2);
 
 /// A console could not be started, or its process could not be spoken to.
 pub const CONSOLE_FAILED: &str = "console_failed";
@@ -174,19 +179,35 @@ struct Console {
     transcript: Arc<Mutex<Transcript>>,
     /// The process id of what it runs, where it runs.
     pid: Arc<Mutex<Option<u32>>>,
+    /// How many of its pipes are still being read.
+    readers: Arc<AtomicUsize>,
+    /// Its process's exit status and when it was seen, once it was reaped.
+    exited: Mutex<Option<(String, Instant)>>,
     machine: Machine,
     kind: Kind,
 }
 
 impl Console {
+    /// How it ended, once its process did and what it printed was read to
+    /// the end (or [`DRAIN`] passed).
+    fn ended(&self) -> Option<String> {
+        let mut exited = lock(&self.exited);
+        if exited.is_none() {
+            let status = lock(&self.child).try_wait().ok().flatten()?;
+            *exited = Some((status.to_string(), Instant::now()));
+        }
+        let (status, seen) = exited.as_ref()?;
+        (self.readers.load(Ordering::SeqCst) == 0 || seen.elapsed() >= DRAIN).then(|| status.clone())
+    }
+
     /// End the console and everything in its process group, then reap it.
     /// Its group is signalled only while its process has not been reaped
-    /// (no [`Transcript::ended`] yet): until then its id cannot have been
+    /// (no [`Console::exited`] yet): until then its id cannot have been
     /// given to another process. A shell that exited by itself earlier
     /// leaves what it put in the background.
     fn end(&self) {
         let pid = *lock(&self.pid);
-        let reaped = lock(&self.transcript).ended.is_some();
+        let reaped = lock(&self.exited).is_some();
         if let (Some(pid), false) = (pid, reaped) {
             match &self.machine {
                 Machine::Local => homology_sys::end_group(pid),
@@ -203,6 +224,7 @@ impl Console {
         let mut child = lock(&self.child);
         let _ = child.kill();
         if let Ok(status) = child.wait() {
+            lock(&self.exited).get_or_insert((status.to_string(), Instant::now()));
             lock(&self.transcript).ended.get_or_insert(status.to_string());
         }
     }
@@ -345,20 +367,25 @@ impl Consoles {
         let transcript = Arc::new(Mutex::new(Transcript::default()));
         let local = matches!(machine, Machine::Local);
         let pid = Arc::new(Mutex::new(local.then(|| child.id())));
-        if let Some(pipe) = child.stdout.take() {
-            let (transcript, pid) = (transcript.clone(), pid.clone());
-            std::thread::spawn(move || read_into(pipe, &transcript, &pid, !local));
-        }
-        if let Some(pipe) = child.stderr.take() {
-            let (transcript, pid) = (transcript.clone(), pid.clone());
-            std::thread::spawn(move || read_into(pipe, &transcript, &pid, false));
+        let readers = Arc::new(AtomicUsize::new(0));
+        let pipes: [(Option<Box<dyn Read + Send>>, bool); 2] = [
+            (child.stdout.take().map(|pipe| Box::new(pipe) as _), !local),
+            (child.stderr.take().map(|pipe| Box::new(pipe) as _), false),
+        ];
+        for (pipe, first) in pipes {
+            let Some(pipe) = pipe else { continue };
+            let (transcript, pid, readers) = (transcript.clone(), pid.clone(), readers.clone());
+            readers.fetch_add(1, Ordering::SeqCst);
+            std::thread::spawn(move || {
+                read_into(pipe, &transcript, &pid, first);
+                readers.fetch_sub(1, Ordering::SeqCst);
+            });
         }
         let id = uuid::Uuid::new_v4().simple().to_string();
-        let stdin = child.stdin.take();
-        lock(&self.open).insert(
-            id.clone(),
-            Arc::new(Console { child: Mutex::new(child), stdin: Mutex::new(stdin), transcript, pid, machine, kind }),
-        );
+        let stdin = Mutex::new(child.stdin.take());
+        let (child, exited) = (Mutex::new(child), Mutex::new(None));
+        lock(&self.open)
+            .insert(id.clone(), Arc::new(Console { child, stdin, transcript, pid, readers, exited, machine, kind }));
         Ok(id)
     }
 
@@ -382,7 +409,7 @@ impl Consoles {
     /// What it printed after `offset`, and whether it still runs.
     pub fn read(&self, id: &str, offset: u64) -> Result<Output, ConsoleError> {
         let console = self.get(id)?;
-        let ended = lock(&console.child).try_wait().ok().flatten().map(|status| status.to_string());
+        let ended = console.ended();
         let mut transcript = lock(&console.transcript);
         if transcript.ended.is_none() {
             transcript.ended = ended;
@@ -545,6 +572,35 @@ mod tests {
             // Reaped: not even a zombie is left.
             assert!(!std::path::Path::new(&format!("/proc/{shell}")).exists(), "the shell {shell} not reaped");
         }
+    }
+
+    /// A shell that prints and exits at once: it is not reported ended
+    /// while what it printed is still unread (here its readers are held at
+    /// the transcript), and then all of it is there (#32).
+    #[test]
+    #[cfg(unix)]
+    fn the_last_output_is_read_before_the_end() {
+        let consoles = Consoles::default();
+        let id = consoles.start(Machine::Local, Kind::Shell, "python3", None).unwrap();
+        let console = consoles.get(&id).unwrap();
+        let held = lock(&console.transcript);
+        consoles.send(&id, "printf 'last-%s\\n' 42; exit 3").unwrap();
+        std::thread::sleep(Duration::from_millis(500));
+        assert_eq!(console.ended(), None, "reported ended before its output was read");
+        drop(held);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let (mut seen, mut offset) = (String::new(), 0);
+        loop {
+            let read = consoles.read(&id, offset).unwrap();
+            seen.push_str(&read.text);
+            offset = read.offset;
+            if !read.running || Instant::now() > deadline {
+                assert!(read.ended.is_some(), "it did not end: {seen:?}");
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(seen.contains("last-42"), "the last output was lost: {seen:?}");
     }
 
     /// A folder in the home keeps its `~` for the shell
