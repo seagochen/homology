@@ -16,6 +16,7 @@
 pub mod bundle;
 pub mod console;
 pub mod deploy;
+pub mod framing;
 mod pool;
 pub mod process;
 pub mod terminal;

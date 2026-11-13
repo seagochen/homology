@@ -1,7 +1,7 @@
 //! Owned pipe processes for language protocols and long-running application services.
 
 use std::collections::VecDeque;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufReader, Read, Write};
 use std::process::{Child, Command, Stdio};
 use std::sync::{mpsc, Arc, Mutex, MutexGuard, PoisonError};
 
@@ -32,7 +32,7 @@ function end(){if(!child.pid)return;try{process.kill(-child.pid,'SIGTERM')}catch
 process.stdin.pipe(child.stdin);child.stdin.on('error',()=>{});
 process.stdin.on('end',end);process.on('SIGTERM',end);process.on('SIGINT',end);process.on('SIGHUP',end);
 child.on('error',e=>{console.error(e.message);process.exit(127)});
-child.on('exit',(code,signal)=>{try{process.kill(-child.pid,'SIGTERM')}catch{};clearTimeout(timer);process.exit(code===null?1:code)});
+child.on('exit',(code,signal)=>{try{process.kill(-child.pid,'SIGKILL')}catch{};clearTimeout(timer);process.exit(code===null?1:code)});
 "#;
 
 /// Build a trusted system-SSH command with a caller-selected remote Node runtime.
@@ -64,19 +64,31 @@ pub enum Output {
 }
 
 /// A bounded, nonblocking mailbox; old output is dropped before producers can stall.
-#[derive(Default)]
 struct Mailbox {
+    maximum: usize,
     events: VecDeque<Output>,
     bytes: usize,
     dropped: bool,
 }
 
+impl Default for Mailbox {
+    /// Preserve the raw-stream retention budget unless a protocol selects its own.
+    fn default() -> Self {
+        Self::new(MAX_OUTPUT)
+    }
+}
+
 impl Mailbox {
+    /// A protocol mailbox must have room for at least one complete allowed frame.
+    fn new(maximum: usize) -> Self {
+        Self { maximum, events: VecDeque::new(), bytes: 0, dropped: false }
+    }
+
     /// Retain the newest bounded output; report that a reader missed older events.
     fn push(&mut self, output: Output) {
         self.bytes += length(&output);
         self.events.push_back(output);
-        while self.bytes > MAX_OUTPUT || self.events.len() > 512 {
+        while self.bytes > self.maximum || self.events.len() > 512 {
             if let Some(event) = self.events.pop_front() {
                 self.bytes = self.bytes.saturating_sub(length(&event));
                 self.dropped = true;
@@ -111,7 +123,9 @@ impl Process {
             command.process_group(0);
         }
         let child = command.spawn().map_err(|error| error.to_string())?;
-        let mut process = Self { child, input: None, output: Arc::default(), exited: None };
+        let maximum = if matches!(framing, Framing::ContentLength) { MAX_FRAME } else { MAX_OUTPUT };
+        let output = Arc::new(Mutex::new(Mailbox::new(maximum)));
+        let mut process = Self { child, input: None, output, exited: None };
         let mut input = process.child.stdin.take().ok_or("Process stdin unavailable")?;
         let (sender, receiver) = mpsc::sync_channel::<Vec<u8>>(8);
         process.input = Some(sender);
@@ -222,40 +236,10 @@ fn read(reader: impl Read, framing: Framing, output: &Mutex<Mailbox>) -> Result<
         return raw(reader, false, output);
     }
     let mut reader = BufReader::new(reader);
-    loop {
-        let mut length = None;
-        let mut headers = 0;
-        loop {
-            let mut line = Vec::new();
-            let count = reader.by_ref().take(8193).read_until(b'\n', &mut line).map_err(|error| error.to_string())?;
-            if count == 0 {
-                return Ok(());
-            }
-            headers += count;
-            if headers > 8192 {
-                return Err("Protocol headers exceed 8 KiB".into());
-            }
-            let line = String::from_utf8(line).map_err(|error| error.to_string())?;
-            if line.trim().is_empty() {
-                if length.is_some() {
-                    break;
-                }
-                continue;
-            }
-            if let Some((key, value)) = line.split_once(':') {
-                if key.eq_ignore_ascii_case("Content-Length") {
-                    length = Some(value.trim().parse::<usize>().map_err(|error| error.to_string())?);
-                }
-            }
-        }
-        let length = length.ok_or("Missing Content-Length")?;
-        if length > MAX_FRAME {
-            return Err("Protocol frame exceeds 4 MiB".into());
-        }
-        let mut frame = vec![0; length];
-        reader.read_exact(&mut frame).map_err(|error| error.to_string())?;
+    while let Some(frame) = crate::framing::content_length(&mut reader, MAX_FRAME).map_err(|error| error.to_string())? {
         lock(output).push(Output::Stdout(frame));
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -272,6 +256,73 @@ mod tests {
         assert!(lock(&output).bytes <= MAX_OUTPUT);
         assert!(lock(&output).dropped);
         assert!(read(&b"Content-Length: 99999999\r\n\r\n"[..], Framing::ContentLength, &output).is_err());
+    }
+    #[cfg(unix)]
+    #[test]
+    fn a_valid_multi_megabyte_frame_is_not_dropped_by_the_mailbox() {
+        let mut command = homology_sys::command("sh");
+        command.args(["-c", "printf 'Content-Length: 2097152\\r\\n\\r\\n'; head -c 2097152 /dev/zero"]);
+        let mut process = Process::start(command, Framing::ContentLength).unwrap();
+        let started = std::time::Instant::now();
+        loop {
+            for event in process.drain() {
+                match event {
+                    Output::Stdout(bytes) => {
+                        assert_eq!(bytes.len(), 2 * 1024 * 1024);
+                        assert!(bytes.iter().all(|byte| *byte == 0));
+                        return;
+                    }
+                    Output::Error(error) => panic!("legal frame was lost: {error}"),
+                    Output::Stderr(_) => {}
+                }
+            }
+            assert!(started.elapsed() < std::time::Duration::from_secs(5));
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "requires Node.js to exercise the remote pipe guard without an SSH server"]
+    fn closing_remote_input_reaps_descendants_that_ignore_termination() {
+        struct Descendant(u32);
+        impl Drop for Descendant {
+            fn drop(&mut self) {
+                let command = std::fs::read(format!("/proc/{}/cmdline", self.0)).unwrap_or_default();
+                if String::from_utf8_lossy(&command).contains("homology-guard-fixture") {
+                    let _ = homology_sys::command("kill").args(["-KILL", &self.0.to_string()]).status();
+                }
+            }
+        }
+        let leaf = "process.title='homology-guard-fixture';process.on('SIGTERM',()=>{});console.log(process.pid);setInterval(()=>{},1000)";
+        let parent = "require('child_process').spawn(process.execPath,['-e',process.argv[1]],{stdio:['ignore','inherit','inherit']});setInterval(()=>{},1000)";
+        let mut command = homology_sys::command("node");
+        command.args(["-e", REMOTE_GUARD, "--", "node", "-e", parent, leaf]);
+        let mut process = Process::start(command, Framing::Raw).unwrap();
+        let start = std::time::Instant::now();
+        let mut bytes = Vec::new();
+        while !bytes.contains(&b'\n') {
+            for event in process.drain() {
+                if let Output::Stdout(chunk) = event {
+                    bytes.extend(chunk);
+                }
+            }
+            assert!(start.elapsed() < std::time::Duration::from_secs(5));
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let descendant = Descendant(String::from_utf8(bytes).unwrap().trim().parse().unwrap());
+        // Closing the pipe models SSH's EOF, without prematurely killing the guard itself.
+        process.input.take();
+        loop {
+            let stat = std::fs::read_to_string(format!("/proc/{}/stat", descendant.0)).ok();
+            if stat.is_none_or(|stat| stat.split(") ").nth(1).is_some_and(|tail| tail.starts_with('Z'))) {
+                break;
+            }
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(5),
+                "grandchild ignored termination and survived SSH EOF"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
     }
     #[cfg(unix)]
     #[test]
