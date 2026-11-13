@@ -709,7 +709,7 @@ mod tests {
     #[test]
     fn a_host_confirmed_at_once_is_recorded_once() {
         let cx = Context::new(crate::App { name: "tool", env: "TOOL" });
-        if !sys::command(keygen_program(&cx)).arg("-?").output().is_ok() {
+        if sys::command(keygen_program(&cx)).arg("-?").output().is_err() {
             eprintln!("no ssh-keygen here");
             return;
         }

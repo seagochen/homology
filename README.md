@@ -160,3 +160,14 @@ the code check (Python modules with a `TOOL` name and `check(texts)`, see
 ## Development
 
 See [AGENTS.md](AGENTS.md).
+
+## 交互式终端（PTY）
+
+`homology::terminal::Terminals` 为本机登录 shell 和系统 SSH（`-tt`）提供 PTY。
+使用 `start` 创建会话，`send` 按顺序发送原始字节，`read` 按偏移读取含 ANSI 控制序列的输出，
+`resize` 同步行列数，`stop` 或销毁管理器结束会话及进程树。输出缓冲区有上限，并保留跨块 UTF-8。
+
+这与逐行 `console::Consoles` 独立，原接口不变。PTY 适用于 Codex 等交互式 TUI；
+ANSI/VT 屏幕解析、绘制、焦点及键盘映射由调用方的终端界面负责，不能把输出直接当普通日志显示。
+SSH 复用调用方的 `Context`、配置、密钥和已确认的主机信任，不使用另一套登录机制。
+`portable-pty` 仅用于调用端 `homology`，不会进入服务器 runner 或增加其部署依赖。

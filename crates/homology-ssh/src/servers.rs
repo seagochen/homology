@@ -92,7 +92,8 @@ impl Invalid {
 /// not used.
 pub fn origin(shared: &Path) -> SshResult<String> {
     let file = shared.join(DEVICE_FILE);
-    let failed = |error: std::io::Error| SshError::new("server_store_write_failed", format!("{}: {error}", file.display()));
+    let failed =
+        |error: std::io::Error| SshError::new("server_store_write_failed", format!("{}: {error}", file.display()));
     let read = |file: &Path| {
         std::fs::read_to_string(file).ok().map(|text| text.trim().to_string()).filter(|id| !id.is_empty())
     };
