@@ -54,6 +54,46 @@ pub fn end_group(leader: u32) {
     let _ = ending.stdout(Stdio::null()).stderr(Stdio::null()).status();
 }
 
+/// Open the file or folder `target` with the program the system uses for
+/// it (`open` on macOS, `explorer` on Windows, `xdg-open` elsewhere). Only
+/// starting it counts (`explorer` exits with 1 even when it worked); the
+/// program is reaped once it ends, never left a zombie.
+pub fn open(target: &Path) -> io::Result<()> {
+    let opener = if cfg!(target_os = "macos") {
+        "open"
+    } else if cfg!(windows) {
+        "explorer"
+    } else {
+        "xdg-open"
+    };
+    reaped(command(opener).arg(target))
+}
+
+/// Open `url` with the program the system uses for its scheme. On Windows
+/// through the shell's URL handler (`rundll32 url.dll,FileProtocolHandler`),
+/// not `explorer`: given a URL it may open a folder instead (it did for
+/// `mailto:` with the new Outlook).
+pub fn open_url(url: &str) -> io::Result<()> {
+    let mut opener = if cfg!(target_os = "macos") {
+        command("open")
+    } else if cfg!(windows) {
+        let mut rundll = command("rundll32");
+        rundll.arg("url.dll,FileProtocolHandler");
+        rundll
+    } else {
+        command("xdg-open")
+    };
+    reaped(opener.arg(url))
+}
+
+/// Start `command` and wait for it on a thread of its own, so that it is
+/// reaped once it ends.
+fn reaped(command: &mut Command) -> io::Result<()> {
+    let mut child = command.stdout(Stdio::null()).stderr(Stdio::null()).spawn()?;
+    std::thread::spawn(move || child.wait());
+    Ok(())
+}
+
 /// A file's lock within the process ([`file_lock`]).
 pub type FileLock = Arc<Mutex<()>>;
 

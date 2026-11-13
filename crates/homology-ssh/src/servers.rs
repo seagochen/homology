@@ -38,7 +38,77 @@ const FILE: &str = "servers.json";
 const SCHEMA: u64 = 1;
 
 /// The longest name a server may have, in characters.
-const LONGEST_NAME: usize = 120;
+pub const LONGEST_NAME: usize = 120;
+
+/// The macOS App Group the programs built on Homology share their servers,
+/// login keys and known hosts in (#19, homology#29): the team's prefix, so it
+/// needs no registration. A program declares it in its
+/// `com.apple.security.application-groups` entitlement and passes it to
+/// [`shared_dir_in`].
+pub const APP_GROUP: &str = "9D45973HBS.io.github.seagochen.homology";
+
+/// The file in the shared folder holding this computer's device id
+/// ([`origin`]).
+const DEVICE_FILE: &str = "device-id";
+
+/// What is wrong with a server as filled in ([`ServerInput::check`]), in
+/// the order a form checks it: the program words it, by the field it is of.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Invalid {
+    /// No name.
+    NameMissing,
+    /// A name of more than [`LONGEST_NAME`] characters.
+    NameTooLong,
+    /// No host.
+    HostMissing,
+    /// A host with `@` in it: the user goes in its own field.
+    HostHasAt,
+    /// SSH port 0.
+    PortZero,
+    /// A host or user `ssh` cannot take.
+    AddressInvalid,
+}
+
+impl Invalid {
+    /// The form's field it is about: `name`, `host` or `port`.
+    pub fn field(self) -> &'static str {
+        match self {
+            Invalid::NameMissing | Invalid::NameTooLong => "name",
+            Invalid::HostMissing | Invalid::HostHasAt | Invalid::AddressInvalid => "host",
+            Invalid::PortZero => "port",
+        }
+    }
+
+    /// Whether it is about what was typed rather than a field left empty.
+    pub fn typed(self) -> bool {
+        !matches!(self, Invalid::NameMissing | Invalid::HostMissing)
+    }
+}
+
+/// This computer's device id, as the saved servers record where they were
+/// made and changed (`origin`; the programs decided, homology#29): kept in
+/// the shared folder `shared`, made (a UUID) the first time. Every program
+/// on this computer writes the same one; a hostname, which can change, is
+/// not used.
+pub fn origin(shared: &Path) -> SshResult<String> {
+    let file = shared.join(DEVICE_FILE);
+    let failed = |error: std::io::Error| SshError::new("server_store_write_failed", format!("{}: {error}", file.display()));
+    let read = |file: &Path| {
+        std::fs::read_to_string(file).ok().map(|text| text.trim().to_string()).filter(|id| !id.is_empty())
+    };
+    if let Some(id) = read(&file) {
+        return Ok(id);
+    }
+    std::fs::create_dir_all(shared).map_err(failed)?;
+    // Another program may make it at the same time: under the list's lock.
+    let _lock = sys::LockFile::take(&self::file(shared)).map_err(failed)?;
+    if let Some(id) = read(&file) {
+        return Ok(id);
+    }
+    let id = uuid::Uuid::now_v7().to_string();
+    sys::atomic_write_bytes(&file, id.as_bytes()).map_err(failed)?;
+    Ok(id)
+}
 
 /// The folder the programs share: [`HOME_VARIABLE`] when it is an absolute
 /// path, else `homology` in the user's configuration folder; none without
@@ -123,8 +193,7 @@ impl ServerInput {
     /// name (up to 120 characters) or host, with a host holding `@`, or a
     /// port of 0.
     pub fn target(&self, path: &str) -> SshResult<SshTarget> {
-        let named = !self.name.trim().is_empty() && self.name.chars().count() <= LONGEST_NAME;
-        if !named || self.host.trim().is_empty() || self.host.contains('@') || self.port == 0 {
+        if self.filled().is_err() {
             return Err(SshError::new(
                 "invalid_server",
                 format!("a name (up to {LONGEST_NAME} characters), host and nonzero SSH port are required"),
@@ -135,6 +204,32 @@ impl ServerInput {
         SshTarget::parse(&format!("ssh://{host}:{}{path}", self.port)).map_err(|_| {
             SshError::new("invalid_server", "invalid SSH host, user or path; use an absolute path or ~/folder")
         })
+    }
+
+    /// The first thing wrong with the server as filled in, as a form
+    /// checks it: the name, the host, the port, then whether `ssh` can take
+    /// the address. The one rule the programs' forms check by.
+    pub fn check(&self) -> Result<(), Invalid> {
+        self.filled()?;
+        self.target("~").map(drop).map_err(|_| Invalid::AddressInvalid)
+    }
+
+    /// [`Self::check`] without the address: every field filled in as it may be.
+    fn filled(&self) -> Result<(), Invalid> {
+        let name = self.name.trim();
+        if name.is_empty() {
+            Err(Invalid::NameMissing)
+        } else if name.chars().count() > LONGEST_NAME {
+            Err(Invalid::NameTooLong)
+        } else if self.host.trim().is_empty() {
+            Err(Invalid::HostMissing)
+        } else if self.host.contains('@') {
+            Err(Invalid::HostHasAt)
+        } else if self.port == 0 {
+            Err(Invalid::PortZero)
+        } else {
+            Ok(())
+        }
     }
 
     /// Whether this is the server `target` names: the same host and port,
@@ -424,6 +519,36 @@ mod tests {
     use super::*;
 
     /// A server named `name` on `host`, port 22.
+    /// The form's rule (homology#29): the first thing wrong, in order, by
+    /// its field; a name counted in characters, not bytes.
+    #[test]
+    fn a_server_filled_in_is_checked_field_by_field() {
+        let checked = |name: &str, host: &str, port: u16| {
+            ServerInput { name: name.into(), host: host.into(), port, ..ServerInput::default() }.check()
+        };
+        assert_eq!(checked("", "", 0), Err(Invalid::NameMissing));
+        assert_eq!(checked(&"名".repeat(LONGEST_NAME), "gpu", 22), Ok(()));
+        assert_eq!(checked(&"名".repeat(LONGEST_NAME + 1), "gpu", 22), Err(Invalid::NameTooLong));
+        assert_eq!(checked("gpu", " ", 22), Err(Invalid::HostMissing));
+        assert_eq!(checked("gpu", "me@gpu", 22), Err(Invalid::HostHasAt));
+        assert_eq!(checked("gpu", "gpu", 0), Err(Invalid::PortZero));
+        assert_eq!(checked("gpu", "-oProxyCommand=x", 22), Err(Invalid::AddressInvalid));
+        assert_eq!(Invalid::HostHasAt.field(), "host");
+        assert!(Invalid::HostHasAt.typed() && !Invalid::HostMissing.typed());
+    }
+
+    /// Every program on the computer records the same device id, made once
+    /// and kept in the shared folder.
+    #[test]
+    fn the_device_id_is_made_once_and_kept() {
+        let shared = tempfile::tempdir().unwrap();
+        let first = origin(shared.path()).unwrap();
+        assert!(uuid::Uuid::parse_str(&first).is_ok(), "{first}");
+        assert_eq!(origin(shared.path()).unwrap(), first);
+        std::fs::write(shared.path().join(DEVICE_FILE), "kept-id\n").unwrap();
+        assert_eq!(origin(shared.path()).unwrap(), "kept-id");
+    }
+
     fn input(name: &str, host: &str, user: &str) -> ServerInput {
         ServerInput {
             id: String::new(),
@@ -619,7 +744,7 @@ mod tests {
     /// folder; `HOMOLOGY_HOME` comes first.
     #[test]
     fn a_program_in_an_app_group_shares_the_group_s_container() {
-        let group = "9D45973HBS.io.github.seagochen.homology";
+        let group = APP_GROUP;
         let environment = |home: &'static str, named: Option<&'static str>| {
             move |name: &str| match name {
                 "HOME" => Some(home.into()),
