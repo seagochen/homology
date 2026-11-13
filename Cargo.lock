@@ -235,6 +235,7 @@ dependencies = [
  "homology-runner",
  "homology-ssh",
  "homology-sys",
+ "nix",
  "portable-pty",
  "sha2",
  "tempfile",

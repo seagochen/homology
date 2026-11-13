@@ -19,6 +19,10 @@ hex.workspace = true
 homology-sys.workspace = true
 uuid.workspace = true
 
+# Observe Linux child exit without reaping, so its process-group id cannot be reused before cleanup.
+[target.'cfg(target_os = "linux")'.dependencies]
+nix = { version = "0.28", features = ["process"] }
+
 [dev-dependencies]
 homology-runner = { workspace = true, features = ["testing"] }
 tempfile.workspace = true

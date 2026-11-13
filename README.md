@@ -171,3 +171,10 @@ See [AGENTS.md](AGENTS.md).
 ANSI/VT 屏幕解析、绘制、焦点及键盘映射由调用方的终端界面负责，不能把输出直接当普通日志显示。
 SSH 复用调用方的 `Context`、配置、密钥和已确认的主机信任，不使用另一套登录机制。
 `portable-pty` 仅用于调用端 `homology`，不会进入服务器 runner 或增加其部署依赖。
+
+## 受管管道进程
+
+`homology::process::Process` 托管长期运行的标准输入/输出进程，可选择原始流或 Content-Length 帧，
+输出与帧大小有上限，原始输入排队且不阻塞调用线程，Drop/stop 负责清理进程。调用方提供本机或 SSH 命令，库不依赖 UI。
+`process::remote_command` 使用调用方指定的远程 Node 运行时包装前台进程，保留协议字节，并在 SSH 输入断开时终止其子进程组。
+Linux 在重收进程前观察退出状态，防止退出的 shell 留下后台子进程；应用管理仍应运行前台脚本，避免自行脱离进程组的守护程序。
