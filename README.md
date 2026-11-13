@@ -160,3 +160,31 @@ the code check (Python modules with a `TOOL` name and `check(texts)`, see
 ## Development
 
 See [AGENTS.md](AGENTS.md).
+
+## 交互式终端（PTY）
+
+`homology::terminal::Terminals` 为本机登录 shell 和系统 SSH（`-tt`）提供 PTY。
+使用 `start` 创建会话，`send` 按顺序发送原始字节，`read` 按偏移读取含 ANSI 控制序列的输出，
+`resize` 同步行列数，`stop` 或销毁管理器结束会话及进程树。输出缓冲区有上限，并保留跨块 UTF-8。
+
+这与逐行 `console::Consoles` 独立，原接口不变。PTY 适用于 Codex 等交互式 TUI；
+ANSI/VT 屏幕解析、绘制、焦点及键盘映射由调用方的终端界面负责，不能把输出直接当普通日志显示。
+SSH 复用调用方的 `Context`、配置、密钥和已确认的主机信任，不使用另一套登录机制。
+`portable-pty` 仅用于调用端 `homology`，不会进入服务器 runner 或增加其部署依赖。
+
+## 受管管道进程
+
+`homology::process::Process` 托管长期运行的标准输入/输出进程，可选择原始流或 Content-Length 帧，
+输出与帧大小有上限，原始输入排队且不阻塞调用线程，Drop/stop 负责清理进程。调用方提供本机或 SSH 命令，库不依赖 UI。
+`process::remote_command` 使用调用方指定的远程 Node 运行时包装前台进程，保留协议字节，并在 SSH 输入断开时终止其子进程组。
+Linux 在重收进程前观察退出状态，防止退出的 shell 留下后台子进程；应用管理仍应运行前台脚本，避免自行脱离进程组的守护程序。
+
+`framing::content_length` 是与 JSON 无关的共用帧解码器，调用方指定正文上限，头部统一限制 8 KiB；
+干净 EOF、截断消息、重复长度和超限消息有明确区分。DAP 等调用方保留自己的 JSON 错误策略。
+原始输出队列保留 1 MiB；协议队列可容纳一个完整的 4 MiB 帧，避免合法大帧因日志缓冲预算过小被丢弃。
+SSH 包装进程退出时强制回收仍留在组内的后代，包括忽略 SIGTERM 的进程。
+
+`homology_ssh::forward_command` 沿用 `Context` 的配置、认证与主机检查构造本机回环端口转发，
+不附加远端 shell 命令；调用方负责选择端口、启动和拥有进程，以及应用地址的访问策略。
+
+共享帧解析的模糊测试：`cargo +nightly fuzz run content_length -- -max_total_time=600 -max_len=16384`。

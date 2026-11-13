@@ -190,6 +190,18 @@ pub fn command_for(
     script: &str,
     login: Login<'_>,
 ) -> SshResult<(Command, Option<askpass::Server>)> {
+    let (mut command, askpass) = connection_command(cx, target, login)?;
+    // The host was checked not to start with `-`; `--` ends the options anyway.
+    command.arg("--").arg(&target.host).arg(script);
+    Ok((command, askpass))
+}
+
+/// Build authentication and connection options once for both commands and forwarding.
+fn connection_command(
+    cx: &Context,
+    target: &SshTarget,
+    login: Login<'_>,
+) -> SshResult<(Command, Option<askpass::Server>)> {
     let mut command = sys::command(ssh_program(cx));
     command.args(config_args(cx));
     let mut askpass = None;
@@ -217,9 +229,47 @@ pub fn command_for(
     if let Some(port) = target.port {
         command.arg("-p").arg(port.to_string());
     }
-    // The host was checked not to start with `-`; `--` ends the options anyway.
-    command.arg("--").arg(&target.host).arg(script);
     Ok((command, askpass))
+}
+
+/// Build a loopback-bound local forward using exactly the context's normal SSH login.
+/// The caller owns the process and chooses free ports; this never opens a public listener.
+pub fn forward_command(
+    cx: &Context,
+    target: &SshTarget,
+    local_port: u16,
+    remote_host: &str,
+    remote_port: u16,
+) -> SshResult<Command> {
+    let host = remote_host.trim_matches(['[', ']']);
+    let host = match host.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V6(address)) => format!("[{address}]"),
+        Ok(address) => address.to_string(),
+        Err(_)
+            if !host.is_empty()
+                && host.len() <= 253
+                && host
+                    .chars()
+                    .all(|character| character.is_ascii_alphanumeric() || matches!(character, '.' | '-')) =>
+        {
+            host.into()
+        }
+        Err(_) => return Err(SshError::new("invalid_forward", "Invalid forwarding destination")),
+    };
+    if local_port == 0 || remote_port == 0 {
+        return Err(SshError::new("invalid_forward", "Forwarding ports must be nonzero"));
+    }
+    let (mut command, _) = connection_command(cx, target, Login::Default)?;
+    command.args([
+        "-N",
+        "-o",
+        "ExitOnForwardFailure=yes",
+        "-L",
+        &format!("127.0.0.1:{local_port}:{host}:{remote_port}"),
+        "--",
+        &target.host,
+    ]);
+    Ok(command)
 }
 
 /// Turn a failed run into a stable code. `ssh` exits with 255 for its own
@@ -302,6 +352,21 @@ mod tests {
         one.set_keys_dir(keys.path().to_path_buf());
         assert_eq!(logins::directory(&one).unwrap(), keys.path());
         assert_eq!(logins::directory(&other).unwrap_err().code, "ssh_keys_unavailable");
+    }
+
+    #[test]
+    fn forwarding_preserves_context_and_never_appends_a_remote_command() {
+        let context = Context::default();
+        context.set_ssh_config("/fixture/ssh-config".into());
+        let target = SshTarget::parse("ssh://me@host:2222/work").unwrap();
+        let command = forward_command(&context, &target, 12345, "[::1]", 3000).unwrap();
+        let arguments: Vec<_> = command.get_args().map(|arg| arg.to_string_lossy().into_owned()).collect();
+        assert!(arguments.contains(&"127.0.0.1:12345:[::1]:3000".into()));
+        assert!(arguments.windows(2).any(|args| args == ["-p", "2222"]));
+        assert!(arguments.windows(2).any(|args| args == ["-F", "/fixture/ssh-config"]));
+        assert_eq!(arguments.last().unwrap(), "me@host");
+        assert!(forward_command(&context, &target, 12345, "localhost:22:other", 3000).is_err());
+        assert!(forward_command(&context, &target, 0, "localhost", 3000).is_err());
     }
 
     #[test]

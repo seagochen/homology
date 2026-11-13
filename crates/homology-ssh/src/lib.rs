@@ -35,7 +35,7 @@ pub mod ssh;
 mod target;
 
 pub use context::{App, Context};
-pub use ssh::{run, run_with_input, run_with_password, session_command};
+pub use ssh::{forward_command, run, run_with_input, run_with_password, session_command};
 pub use target::{quoted_dir, shell_quote, SshTarget};
 
 use std::fmt;
@@ -72,6 +72,7 @@ pub type SshResult<T> = Result<T, SshError>;
 /// failures apart.
 pub const CODES: &[&str] = &[
     "invalid_remote",
+    "invalid_forward",
     "ssh_missing",
     "ssh_failed",
     "ssh_unreachable",

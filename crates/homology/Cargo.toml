@@ -10,12 +10,18 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+# Safe, cross-platform PTY ownership for interactive local/SSH tools; runner stays unchanged.
+portable-pty = "0.9"
 homology-runner.workspace = true
 homology-ssh.workspace = true
 sha2.workspace = true
 hex.workspace = true
 homology-sys.workspace = true
 uuid.workspace = true
+
+# Observe Linux child exit without reaping, so its process-group id cannot be reused before cleanup.
+[target.'cfg(target_os = "linux")'.dependencies]
+nix = { version = "0.28", features = ["process"] }
 
 [dev-dependencies]
 homology-runner = { workspace = true, features = ["testing"] }

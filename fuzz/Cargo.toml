@@ -18,6 +18,7 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 homology-runner = { path = "../crates/homology-runner" }
+homology = { path = "../crates/homology" }
 
 # Not a member of Homology's workspace.
 [workspace]
@@ -47,6 +48,13 @@ bench = false
 [[bin]]
 name = "program_output"
 path = "fuzz_targets/program_output.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "content_length"
+path = "fuzz_targets/content_length.rs"
 test = false
 doc = false
 bench = false
