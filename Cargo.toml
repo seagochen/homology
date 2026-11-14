@@ -9,6 +9,7 @@ rust-version = "1.87"
 publish = false
 
 [workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
 homology-sys = { path = "crates/homology-sys" }
 homology-runner = { path = "crates/homology-runner" }
 homology-ssh = { path = "crates/homology-ssh" }
