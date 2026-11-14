@@ -38,6 +38,15 @@ pub struct Area {
 }
 
 impl Area {
+    /// The area from the corners `min` (left, top) and `max` (right, bottom)
+    /// in the UI's logical points, rounded to physical pixels at
+    /// `pixels_per_point`: how a UI toolkit's rectangle becomes what
+    /// [`set_regions`] takes.
+    pub fn from_points(min: [f32; 2], max: [f32; 2], pixels_per_point: f32) -> Self {
+        let pixel = |value: f32| (value * pixels_per_point).round() as i32;
+        Self { left: pixel(min[0]), top: pixel(min[1]), right: pixel(max[0]), bottom: pixel(max[1]) }
+    }
+
     /// Whether the point `(x, y)` is inside (right and bottom edges excluded).
     fn contains(&self, x: i32, y: i32) -> bool {
         x >= self.left && x < self.right && y >= self.top && y < self.bottom
@@ -469,6 +478,12 @@ mod ffi {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn points_become_rounded_physical_pixels() {
+        let area = Area::from_points([10.2, 0.0], [100.5, 35.0], 1.5);
+        assert_eq!(area, Area { left: 15, top: 0, right: 151, bottom: 53 });
+    }
 
     #[test]
     fn the_top_edge_resizes_the_caption_moves_and_the_rest_is_the_app_s() {

@@ -21,6 +21,7 @@ pub mod framing;
 mod pool;
 pub mod process;
 pub mod terminal;
+mod transcript;
 
 pub use pool::Pool;
 

@@ -98,11 +98,29 @@ pub fn find(env: &str, name: &str, configured: Option<&Path>, bundled_only: bool
     select(env, std::env::var(env).ok(), exe_dir.as_deref(), name, configured, bundled_only)
 }
 
+/// A frame rate as `ffprobe` writes it (`30000/1001`, `25`); none when it
+/// is not a positive number. Every product that probes a video with the
+/// bundled `ffprobe` reads its rates this way.
+pub fn frame_rate(text: &str) -> Option<f64> {
+    let (numerator, denominator) = text.split_once('/').unwrap_or((text, "1"));
+    let (numerator, denominator): (f64, f64) = (numerator.trim().parse().ok()?, denominator.trim().parse().ok()?);
+    (denominator != 0.0 && numerator > 0.0).then(|| numerator / denominator)
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::*;
+
+    #[test]
+    fn frame_rates_are_read_as_ffprobe_writes_them() {
+        assert_eq!(frame_rate("25"), Some(25.0));
+        assert!(frame_rate("30000/1001").is_some_and(|rate| (rate - 29.97).abs() < 0.01));
+        for broken in ["0/0", "25/0", "0/1", "-30/1", "", "n/a"] {
+            assert_eq!(frame_rate(broken), None, "{broken}");
+        }
+    }
 
     fn executable(dir: &Path, name: &str) -> PathBuf {
         std::fs::create_dir_all(dir).unwrap();
