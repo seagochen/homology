@@ -4,41 +4,16 @@
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{mpsc, Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{mpsc, Arc, Mutex};
 
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize};
 
 use crate::console::Machine;
+use crate::transcript::{lock, take_text, Transcript};
 
-/// The transcript is bounded independently of the UI's terminal scrollback.
+/// The transcript is bounded independently of the UI's terminal scrollback;
+/// output is kept as complete UTF-8 characters, ANSI control bytes intact.
 const KEEP: usize = 1024 * 1024;
-
-/// Lock shared state even after a worker panicked.
-fn lock<T>(value: &Mutex<T>) -> MutexGuard<'_, T> {
-    value.lock().unwrap_or_else(PoisonError::into_inner)
-}
-
-/// Output retained as complete UTF-8 characters; ANSI control bytes remain intact.
-#[derive(Default)]
-struct Transcript {
-    text: String,
-    dropped: u64,
-}
-
-impl Transcript {
-    /// Append complete text, dropping only at character boundaries.
-    fn append(&mut self, text: &str) {
-        self.text.push_str(text);
-        if self.text.len() > KEEP {
-            let mut cut = self.text.len() - KEEP;
-            while !self.text.is_char_boundary(cut) {
-                cut += 1;
-            }
-            self.text.drain(..cut);
-            self.dropped += cut as u64;
-        }
-    }
-}
 
 /// A PTY's incremental output, suitable for an ANSI/VT terminal emulator.
 pub struct Output {
@@ -184,7 +159,7 @@ impl Terminals {
                 }
             }
         });
-        let transcript = Arc::new(Mutex::new(Transcript::default()));
+        let transcript = Arc::new(Mutex::new(Transcript::new(KEEP)));
         let into = transcript.clone();
         std::thread::spawn(move || read(reader, &into));
         let session =
@@ -217,13 +192,8 @@ impl Terminals {
             return Err(error);
         }
         let running = lock(&session.child).try_wait().map_err(|error| error.to_string())?.is_none();
-        let transcript = lock(&session.transcript);
-        let start = offset.saturating_sub(transcript.dropped) as usize;
-        Ok(Output {
-            text: transcript.text.get(start..).unwrap_or_default().to_string(),
-            offset: transcript.dropped + transcript.text.len() as u64,
-            running,
-        })
+        let (text, offset) = lock(&session.transcript).since(offset);
+        Ok(Output { text, offset, running })
     }
 
     /// Stop and reap a session; dropping the registry also stops every session.
@@ -247,26 +217,7 @@ fn read(mut reader: impl Read, transcript: &Mutex<Transcript>) {
             break;
         }
         pending.extend_from_slice(&buffer[..count]);
-        loop {
-            match std::str::from_utf8(&pending) {
-                Ok(text) => {
-                    lock(transcript).append(text);
-                    pending.clear();
-                    break;
-                }
-                Err(error) => {
-                    let valid = error.valid_up_to();
-                    lock(transcript).append(&String::from_utf8_lossy(&pending[..valid]));
-                    pending.drain(..valid);
-                    if let Some(length) = error.error_len() {
-                        lock(transcript).append("�");
-                        pending.drain(..length);
-                    } else {
-                        break;
-                    }
-                }
-            }
-        }
+        lock(transcript).push(&take_text(&mut pending));
     }
 }
 
@@ -326,7 +277,7 @@ mod tests {
                 self.0.read(&mut buffer[..1])
             }
         }
-        let transcript = Mutex::new(Transcript::default());
+        let transcript = Mutex::new(Transcript::new(KEEP));
         read(Bytes(std::io::Cursor::new("中文\x1b[31m内容".as_bytes().to_vec())), &transcript);
         assert_eq!(lock(&transcript).text, "中文\x1b[31m内容");
     }

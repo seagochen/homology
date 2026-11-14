@@ -19,10 +19,12 @@ use std::fmt;
 use std::io::{Read, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use homology_ssh::{shell_quote, Context, SshError, SshTarget};
+
+use crate::transcript::{lock, take_text, Transcript};
 
 /// The most of a console's transcript kept.
 pub const KEEP: usize = 1024 * 1024;
@@ -130,44 +132,18 @@ fn bin_of(python: &str) -> Option<&str> {
     python.rsplit_once(['/', '\\']).map(|(dir, _)| dir).filter(|dir| !dir.is_empty())
 }
 
-/// Lock `mutex`, going on with what a panicked holder left.
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(PoisonError::into_inner)
-}
-
-/// What a console printed, its last `KEEP` bytes, and how it ended.
-#[derive(Default)]
-struct Transcript {
-    text: String,
-    /// Bytes dropped from the start (offsets count from the very first).
-    dropped: u64,
+/// What a console printed and how it ended.
+struct Printed {
+    /// Its output, the last `KEEP` bytes.
+    transcript: Transcript,
     /// How it ended, once it did.
     ended: Option<String>,
 }
 
-impl Transcript {
-    /// Add `text`, dropping the oldest beyond `KEEP` at a character boundary.
-    fn push(&mut self, text: &str) {
-        self.text.push_str(text);
-        if self.text.len() > KEEP {
-            let mut cut = self.text.len() - KEEP;
-            while !self.text.is_char_boundary(cut) {
-                cut += 1;
-            }
-            self.text.drain(..cut);
-            self.dropped += cut as u64;
-        }
-    }
-
-    /// What came after `offset`, and the offset after it.
-    fn since(&self, offset: u64) -> (String, u64) {
-        let end = self.dropped + self.text.len() as u64;
-        let from = offset.clamp(self.dropped, end) - self.dropped;
-        let mut from = usize::try_from(from).unwrap_or(0);
-        while from < self.text.len() && !self.text.is_char_boundary(from) {
-            from += 1;
-        }
-        (self.text[from..].to_string(), end)
+impl Default for Printed {
+    /// Nothing printed yet, still running.
+    fn default() -> Self {
+        Self { transcript: Transcript::new(KEEP), ended: None }
     }
 }
 
@@ -176,7 +152,7 @@ impl Transcript {
 struct Console {
     child: Mutex<Child>,
     stdin: Mutex<Option<ChildStdin>>,
-    transcript: Arc<Mutex<Transcript>>,
+    transcript: Arc<Mutex<Printed>>,
     /// The process id of what it runs, where it runs.
     pid: Arc<Mutex<Option<u32>>>,
     /// How many of its pipes are still being read.
@@ -309,7 +285,7 @@ fn host_script(kind: Kind, python: &str, dir: Option<&str>) -> String {
 /// Read `pipe` into `transcript` until it closes: whole characters only,
 /// bash's complaint about having no terminal left out, and (`first`) a
 /// host's first line taken as the process id.
-fn read_into(mut pipe: impl Read, transcript: &Mutex<Transcript>, pid: &Mutex<Option<u32>>, mut first: bool) {
+fn read_into(mut pipe: impl Read, transcript: &Mutex<Printed>, pid: &Mutex<Option<u32>>, mut first: bool) {
     let mut buffer = [0u8; 8192];
     let mut pending = Vec::new();
     loop {
@@ -327,13 +303,8 @@ fn read_into(mut pipe: impl Read, transcript: &Mutex<Transcript>, pid: &Mutex<Op
             }
             first = false;
         }
-        // Whole characters only; the rest waits for the next read.
-        let valid = match std::str::from_utf8(&pending) {
-            Ok(_) => pending.len(),
-            Err(error) => error.valid_up_to(),
-        };
-        let mut text = String::from_utf8_lossy(&pending[..valid]).to_string();
-        pending.drain(..valid);
+        // Whole characters only; a split one waits for the next read.
+        let mut text = take_text(&mut pending);
         if NO_TERMINAL.iter().any(|said| text.contains(said)) {
             text = text
                 .lines()
@@ -341,7 +312,7 @@ fn read_into(mut pipe: impl Read, transcript: &Mutex<Transcript>, pid: &Mutex<Op
                 .map(|line| format!("{line}\n"))
                 .collect();
         }
-        lock(transcript).push(&text);
+        lock(transcript).transcript.push(&text);
     }
 }
 
@@ -364,7 +335,7 @@ impl Consoles {
             .stderr(Stdio::piped());
         let mut child =
             command.spawn().map_err(|error| ConsoleError::Failed(format!("cannot start {python}: {error}")))?;
-        let transcript = Arc::new(Mutex::new(Transcript::default()));
+        let transcript = Arc::new(Mutex::new(Printed::default()));
         let local = matches!(machine, Machine::Local);
         let pid = Arc::new(Mutex::new(local.then(|| child.id())));
         let readers = Arc::new(AtomicUsize::new(0));
@@ -399,7 +370,7 @@ impl Consoles {
     pub fn send(&self, id: &str, line: &str) -> Result<(), ConsoleError> {
         let console = self.get(id)?;
         if console.kind == Kind::Python {
-            lock(&console.transcript).push(&format!("{line}\n"));
+            lock(&console.transcript).transcript.push(&format!("{line}\n"));
         }
         let mut stdin = lock(&console.stdin);
         let pipe = stdin.as_mut().ok_or(ConsoleError::Ended)?;
@@ -410,12 +381,12 @@ impl Consoles {
     pub fn read(&self, id: &str, offset: u64) -> Result<Output, ConsoleError> {
         let console = self.get(id)?;
         let ended = console.ended();
-        let mut transcript = lock(&console.transcript);
-        if transcript.ended.is_none() {
-            transcript.ended = ended;
+        let mut printed = lock(&console.transcript);
+        if printed.ended.is_none() {
+            printed.ended = ended;
         }
-        let (text, offset) = transcript.since(offset);
-        Ok(Output { text, offset, running: transcript.ended.is_none(), ended: transcript.ended.clone() })
+        let (text, offset) = printed.transcript.since(offset);
+        Ok(Output { text, offset, running: printed.ended.is_none(), ended: printed.ended.clone() })
     }
 
     /// Ctrl+C: SIGINT to the console's process group (Unix hosts): what the
@@ -460,7 +431,7 @@ mod tests {
 
     #[test]
     fn the_transcript_keeps_its_end_and_reads_on_by_offset() {
-        let mut transcript = Transcript::default();
+        let mut transcript = Transcript::new(KEEP);
         transcript.push(">>> ");
         let (text, offset) = transcript.since(0);
         assert_eq!((text.as_str(), offset), (">>> ", 4));
