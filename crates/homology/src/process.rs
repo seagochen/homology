@@ -3,17 +3,14 @@
 use std::collections::VecDeque;
 use std::io::{BufReader, Read, Write};
 use std::process::{Child, Command, Stdio};
-use std::sync::{mpsc, Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{mpsc, Arc, Mutex};
 
 /// Protocol frames are bounded independently of the retained event queue.
 const MAX_FRAME: usize = 4 * 1024 * 1024;
 /// Retained output cannot grow with a noisy or unattended service.
 const MAX_OUTPUT: usize = 1024 * 1024;
 
-/// Recover a worker's shared output after a poisoned lock.
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(PoisonError::into_inner)
-}
+use crate::transcript::lock;
 
 /// How stdout is transported. Stderr is always retained as raw log bytes.
 #[derive(Clone, Copy)]
