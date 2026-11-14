@@ -18,11 +18,20 @@ sha2.workspace = true
 hex.workspace = true
 homology-sys.workspace = true
 uuid.workspace = true
+# Client-only verified tool archives; never included in the deployed runner.
+ureq = { version = "3", default-features = false, features = ["native-tls"] }
+flate2 = "1"
+tar = "0.4"
+zip = { version = "4", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+tempfile.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 
 # Observe Linux child exit without reaping, so its process-group id cannot be reused before cleanup.
 [target.'cfg(target_os = "linux")'.dependencies]
 nix = { version = "0.28", features = ["process"] }
 
 [dev-dependencies]
+proptest.workspace = true
 homology-runner = { workspace = true, features = ["testing"] }
 tempfile.workspace = true

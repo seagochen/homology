@@ -13,6 +13,7 @@
 //! [`Program`]: its own (`annotarycat-runner` with its operations) or
 //! Homology's plain `homology-runner`.
 
+pub mod artifact;
 pub mod bundle;
 pub mod console;
 pub mod deploy;

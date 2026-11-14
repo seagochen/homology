@@ -188,3 +188,15 @@ SSH 包装进程退出时强制回收仍留在组内的后代，包括忽略 SIG
 不附加远端 shell 命令；调用方负责选择端口、启动和拥有进程，以及应用地址的访问策略。
 
 共享帧解析的模糊测试：`cargo +nightly fuzz run content_length -- -max_total_time=600 -max_len=16384`。
+
+## 私有工具发行包
+
+`homology::artifact::prepare` 根据调用方给出的固定 HTTPS 地址、SHA-256、入口路径和大小上限，
+准备 tar.gz / ZIP 工具发行包。不依赖 Node、npm、Python、curl 或安装脚本，厂商与版本策略由调用方决定。
+仅支持普通文件和目录，拒绝路径穿越、符号链接、硬链接、设备文件、Windows 特殊路径及重复条目；
+压缩下载量、解压总量和条目数均有上限。完成校验后才发布缓存目录，失败清理临时文件；
+后续使用重新检查所有清单文件的摘要，进程间通过现有锁串行准备。缓存目录必须由调用方独占，不能来自项目配置。
+
+下载采用 `ureq` 的原生 TLS 后端：Linux 构建需 OpenSSL 开发包和 pkg-config，运行需系统 OpenSSL；
+macOS 和 Windows 使用系统证书及 TLS。压缩解包、HTTP 和清单依赖仅进入客户端 `homology`，
+不进入 SSH runner，不改变协议和远程部署依赖。缓存事务与归档路径规则有网络无关测试及属性测试。
