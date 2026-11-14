@@ -22,7 +22,7 @@ uuid.workspace = true
 ureq = { version = "3", default-features = false, features = ["native-tls"] }
 flate2 = "1"
 tar = "0.4"
-zip = { version = "4", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+zip = { version = "4", default-features = false, features = ["deflate-flate2"] }
 tempfile.workspace = true
 serde.workspace = true
 serde_json.workspace = true
